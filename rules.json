@@ -1,0 +1,64 @@
+{
+  "schema_version": "1.0",
+  "package": "rules-pack-stationary-er",
+  "generated_at": "2025-09-07T00:00:00",
+  "rules": [
+    {
+      "id": "STA-001",
+      "title": "Ежедневные записи лечащего врача",
+      "severity": "major",
+      "sources": [
+        {"order_no": "ҚР-ДСМ-27", "date": "2022-03-24", "clause": "общие требования к ведению истории"}
+      ],
+      "profile": "STA"
+    },
+    {
+      "id": "STA-002",
+      "title": "Первичный осмотр при поступлении ≤ X часов",
+      "severity": "critical",
+      "params": { "ПЕРВИЧНЫЙ_ОСМОТР_ЧАСОВ": 6 },
+      "sources": [
+        {"order_no": "ҚР-ДСМ-27", "date": "2022-03-24", "clause": "первичный осмотр"}
+      ],
+      "profile": "STA"
+    },
+    {
+      "id": "STA-006",
+      "title": "Полнота атрибутов в листе назначений",
+      "severity": "major",
+      "sources": [
+        {"order_no": "ҚР-ДСМ-27", "date": "2022-03-24", "clause": "лист назначений: доза/путь/кратность"}
+      ],
+      "profile": "STA"
+    },
+    {
+      "id": "STA-010",
+      "title": "Выписной эпикриз датирован днём выписки",
+      "severity": "critical",
+      "sources": [
+        {"order_no": "ҚР-ДСМ-27", "date": "2022-03-24", "clause": "выписной эпикриз"}
+      ],
+      "profile": "STA"
+    },
+    {
+      "id": "ER-001",
+      "title": "Триаж ≤ X минут от поступления",
+      "severity": "critical",
+      "params": { "TRIAGE_MAX_MIN": 15 },
+      "sources": [
+        {"order_no": "ҚР ДСМ-27", "date": "2021-04-02", "clause": "экстренная помощь/приёмное"}
+      ],
+      "profile": "ER"
+    },
+    {
+      "id": "ER-004",
+      "title": "ЭКГ при болях в груди ≤ X минут",
+      "severity": "critical",
+      "params": { "ECG_MAX_MIN": 10 },
+      "sources": [
+        {"order_no": "ҚР ДСМ-139", "date": "2021-12-31", "clause": "кардиологическая помощь"}
+      ],
+      "profile": "ER"
+    }
+  ]
+}
