@@ -40,22 +40,38 @@ def require_api_key(x_api_key: Optional[str] = Header(default=None)):
     if not x_api_key or x_api_key != API_KEY:
         raise HTTPException(status_code=401, detail="Unauthorized")
     return True
-
 def ensure_docs_table():
-    """На случай чистой БД — минимально обеспечим таблицу docs."""
+    """
+    Гарантирует наличие таблицы docs и всех необходимых колонок.
+    Безопасно для повторного вызова (idempotent).
+    """
     conn = get_conn()
     conn.executescript("""
     CREATE TABLE IF NOT EXISTS docs(
-      doc_id TEXT PRIMARY KEY,
-      filename TEXT NOT NULL,
-      path TEXT,
-      dept TEXT,
-      department TEXT,
+      doc_id     TEXT PRIMARY KEY,
       created_at TEXT NOT NULL
     );
     """)
+    # актуальные колонки, которые должны быть
+    required_cols = {
+        "filename":   "TEXT",
+        "path":       "TEXT",
+        "dept":       "TEXT",
+        "department": "TEXT"
+    }
+
+    # какие колонки уже есть
+    cur = conn.execute("PRAGMA table_info(docs)")
+    existing = {row[1] for row in cur.fetchall()}  # row[1] = name
+
+    # добавим недостающие
+    for col, coltype in required_cols.items():
+        if col not in existing:
+            conn.execute(f"ALTER TABLE docs ADD COLUMN {col} {coltype}")
+
     conn.commit()
     conn.close()
+
 
 # импортируем функции правил (для /debug/rules)
 from medqc_rules import (
