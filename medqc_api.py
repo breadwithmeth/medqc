@@ -4,6 +4,7 @@ import uuid
 import sqlite3
 from datetime import datetime
 from typing import List, Dict, Any, Optional
+import hashlib
 
 from fastapi import FastAPI, UploadFile, File, Form, Header, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
@@ -40,10 +41,12 @@ def require_api_key(x_api_key: Optional[str] = Header(default=None)):
     if not x_api_key or x_api_key != API_KEY:
         raise HTTPException(status_code=401, detail="Unauthorized")
     return True
+
+
 def ensure_docs_table():
     """
-    Гарантирует наличие таблицы docs и всех необходимых колонок.
-    Безопасно для повторного вызова (idempotent).
+    Создаёт таблицу docs, если её нет, с минимальным набором.
+    НЕ переопределяет существующую схему (мягкая миграция).
     """
     conn = get_conn()
     conn.executescript("""
@@ -52,25 +55,64 @@ def ensure_docs_table():
       created_at TEXT NOT NULL
     );
     """)
-    # актуальные колонки, которые должны быть
-    required_cols = {
+    # при необходимости добавим самые часто используемые поля
+    existing = {r[1] for r in conn.execute("PRAGMA table_info(docs)").fetchall()}
+    for col, ctype in {
         "filename":   "TEXT",
         "path":       "TEXT",
         "dept":       "TEXT",
-        "department": "TEXT"
-    }
-
-    # какие колонки уже есть
-    cur = conn.execute("PRAGMA table_info(docs)")
-    existing = {row[1] for row in cur.fetchall()}  # row[1] = name
-
-    # добавим недостающие
-    for col, coltype in required_cols.items():
+        "department": "TEXT",
+        "sha256":     "TEXT"
+    }.items():
         if col not in existing:
-            conn.execute(f"ALTER TABLE docs ADD COLUMN {col} {coltype}")
-
+            conn.execute(f"ALTER TABLE docs ADD COLUMN {col} {ctype}")
     conn.commit()
     conn.close()
+
+
+
+
+
+def get_table_info(conn: sqlite3.Connection, table: str):
+    """Возвращает словарь колонок: name -> {'type': str, 'notnull': bool, 'dflt': any}"""
+    info = {}
+    for cid, name, ctype, notnull, dflt, pk in conn.execute(f"PRAGMA table_info({table})"):
+        info[name] = {"type": (ctype or "").upper(), "notnull": bool(notnull), "default": dflt, "pk": bool(pk)}
+    return info
+
+def safe_defaults(coltype: str):
+    """Дешёвые дефолты для NOT NULL колонок, если нет данных."""
+    t = (coltype or "").upper()
+    if "INT" in t:
+        return 0
+    # для дат/времени — строка времени
+    if "DATE" in t or "TIME" in t:
+        return datetime.utcnow().isoformat() + "Z"
+    # по умолчанию пустая строка
+    return ""
+
+def insert_row_dynamic(conn: sqlite3.Connection, table: str, data: dict):
+    """
+    Динамически вставляет строку с учётом реальных колонок таблицы.
+    Для NOT NULL колонок без значения подставляет безопасные дефолты.
+    """
+    cols_info = get_table_info(conn, table)
+    # соберём значения
+    row = {}
+    for name, meta in cols_info.items():
+        if name in data and data[name] is not None:
+            row[name] = data[name]
+        elif meta["notnull"] and not meta["pk"]:
+            # если NOT NULL и нет значения — подставим дефолт
+            row[name] = safe_defaults(meta["type"])
+
+    if not row:
+        raise RuntimeError(f"Table {table} has no columns to insert")
+
+    fields = ",".join(row.keys())
+    placeholders = ",".join(["?"] * len(row))
+    values = list(row.values())
+    conn.execute(f"INSERT OR REPLACE INTO {table} ({fields}) VALUES ({placeholders})", values)
 
 
 # импортируем функции правил (для /debug/rules)
@@ -195,15 +237,27 @@ async def ingest_file(
     blob = await file.read()
     with open(dst_path, "wb") as f:
         f.write(blob)
-
+    sha256 = hashlib.sha256(blob).hexdigest()
+    size = len(blob)
+    mime = file.content_type or ""
     # Запись в docs
     conn = get_conn()
-    conn.execute(
-        "INSERT OR REPLACE INTO docs(doc_id, filename, path, dept, department, created_at) VALUES(?,?,?,?,?,?)",
-        (doc_id, safe_name, dst_path, dept, department, datetime.utcnow().isoformat() + "Z")
-    )
-    conn.commit()
-    conn.close()
+    try:
+        insert_row_dynamic(conn, "docs", {
+            "doc_id": doc_id,
+            "filename": safe_name,
+            "path": dst_path,
+            "dept": dept,
+            "department": department,
+            "created_at": datetime.utcnow().isoformat() + "Z",
+            "sha256": sha256,
+            "size": size,
+            "mime": mime,
+            "status": "new"
+        })
+        conn.commit()
+    finally:
+        conn.close()
 
     # Запускаем полный пайплайн (extract → section → entities → timeline → rules)
     try:
@@ -220,3 +274,7 @@ async def ingest_file(
         )
 
     return {"doc_id": doc_id, "status": "OK"}
+@app.post("/v1/admin/migrate")
+def admin_migrate(_: bool = Depends(require_api_key)):
+    ensure_docs_table()
+    return {"status": "migrated", "db": DB_PATH}
