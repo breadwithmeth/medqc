@@ -1,407 +1,495 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""
-medqc-rules — проверка истории по событиям/сущностям.
-Теперь поддерживает ДВА источника правил:
-  1) --rules rules.json         (замороженный файл)
-  2) --pkg <name> --version <v> (runtime из БД norm_packages/norm_rules)
 
-Примеры:
-  # из JSON
-  python medqc_rules.py --doc-id KZ-... --rules compiled_rules.json
-
-  # runtime из БД (взято из medqc-norms-admin)
-  python medqc_rules.py --doc-id KZ-... --pkg rules-pack-stationary-er --version 2025-09-07
-  # с фильтром по профилям и включением отключённых правил
-  python medqc_rules.py --doc-id KZ-... --pkg rules-pack-stationary-er --version 2025-09-07 \
-                        --profiles STA,ER --include-disabled
-"""
-from __future__ import annotations
-import argparse, json, math, sqlite3
-from datetime import datetime, timedelta, date
+import os
+import json
+import sqlite3
+from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
-import medqc_db as db  # используем db.connect(), get_doc/sections/entities/events
+DB_PATH = os.getenv("MEDQC_DB", "./medqc.db")
 
-# ---------- схема для таблицы violations (создаём здесь, чтобы не трогать medqc_db) ----------
-VIOLATIONS_SCHEMA = """
-CREATE TABLE IF NOT EXISTS violations (
-  id            INTEGER PRIMARY KEY AUTOINCREMENT,
-  doc_id        TEXT NOT NULL,
-  rule_id       TEXT NOT NULL,
-  severity      TEXT NOT NULL,
-  message       TEXT NOT NULL,
-  evidence_json TEXT,
-  sources_json  TEXT,
-  created_at    TEXT NOT NULL,
-  FOREIGN KEY(doc_id) REFERENCES docs(doc_id)
-);
-CREATE INDEX IF NOT EXISTS idx_violations_doc ON violations(doc_id);
-"""
+# ---------- utils ----------
 
-# ---------- дефолтные правила (если --rules и --pkg не заданы) ----------
-DEFAULT_RULES = {
-  "schema_version": "1.0",
-  "rules": [
-    {"id": "STA-001", "profile": "STA", "title": "Ежедневные записи лечащего врача",
-     "severity": "major", "sources": [{"order_no": "ҚР-ДСМ-27", "date": "2022-03-24"}]},
-    {"id": "STA-002", "profile": "STA", "title": "Первичный осмотр при поступлении",
-     "severity": "critical", "params": {"ПЕРВИЧНЫЙ_ОСМОТР_ЧАСОВ": 6},
-     "sources": [{"order_no": "ҚР-ДСМ-27", "date": "2022-03-24"}]},
-    {"id": "STA-006", "profile": "STA", "title": "Полнота атрибутов в листе назначений",
-     "severity": "major", "sources": [{"order_no": "ҚР-ДСМ-27", "date": "2022-03-24"}]},
-    {"id": "STA-010", "profile": "STA", "title": "Выписной эпикриз в день выписки",
-     "severity": "critical", "sources": [{"order_no": "ҚР-ДСМ-27", "date": "2022-03-24"}]},
-    {"id": "ER-001", "profile": "ER", "title": "Триаж при поступлении",
-     "severity": "critical", "params": {"TRIAGE_MAX_MIN": 15},
-     "sources": [{"order_no": "ҚР ДСМ-27", "date": "2021-04-02"}]},
-    {"id": "ER-004", "profile": "ER", "title": "Боль в груди: ЭКГ в допустимые сроки",
-     "severity": "critical", "params": {"ECG_MAX_MIN": 10},
-     "sources": [{"order_no": "ҚР ДСМ-139", "date": "2021-12-31"}]},
-  ]
-}
+def _row_to_dict(cur, row) -> Dict[str, Any]:
+    cols = [c[0] for c in cur.description]
+    return {cols[i]: row[i] for i in range(len(cols))}
 
-# ---------- утилиты времени/дат ----------
+def _fetch_all(conn: sqlite3.Connection, sql: str, params=()) -> List[Dict[str, Any]]:
+    cur = conn.execute(sql, params)
+    rows = cur.fetchall()
+    return [_row_to_dict(cur, r) for r in rows]
+
+def _fetch_one(conn: sqlite3.Connection, sql: str, params=()) -> Dict[str, Any]:
+    cur = conn.execute(sql, params)
+    r = cur.fetchone()
+    return _row_to_dict(cur, r) if r else {}
+
 def parse_iso_any(s: Optional[str]) -> Optional[datetime]:
-    if not s:
-        return None
-    s2 = s.replace("Z", "").replace(" ", "T")
+    if not s: return None
+    s = str(s).strip()
+    for fmt in ("%Y-%m-%dT%H:%M:%S","%Y-%m-%dT%H:%M","%Y-%m-%d %H:%M:%S","%Y-%m-%d %H:%M","%Y-%m-%d"):
+        try: return datetime.strptime(s, fmt)
+        except: pass
     try:
-        return datetime.fromisoformat(s2)
-    except Exception:
-        return None
+        t = s.replace("Z","")
+        if "+" in t: t = t.split("+",1)[0]
+        return datetime.fromisoformat(t)
+    except: return None
 
-def day_span(start_dt: datetime, end_dt: datetime) -> List[date]:
-    ds: List[date] = []
-    d = start_dt.date()
-    while d <= end_dt.date():
-        ds.append(d)
-        d = date.fromordinal(d.toordinal() + 1)
-    return ds
+def minutes_between(a: Optional[datetime], b: Optional[datetime]) -> Optional[int]:
+    if not a or not b: return None
+    return int(abs((b-a).total_seconds())//60)
 
-# ---------- маленькие хелперы для sqlite3.Row ----------
-def row_has(row, key: str) -> bool:
-    try:
-        return key in row.keys()
-    except Exception:
-        return False
+def day_span(a: Optional[datetime], b: Optional[datetime]) -> Optional[int]:
+    if not a or not b: return None
+    return (b.date()-a.date()).days + 1
 
-def row_get(row, key: str):
-    return row[key] if row_has(row, key) else None
+def norm_json(obj: Any) -> str:
+    try: return json.dumps(obj, ensure_ascii=False, separators=(",",":"))
+    except: return "{}"
 
-def ev_ts(ev) -> Optional[datetime]:
-    """Вернёт datetime из events-строки: сначала 'ts' (из БД), fallback 'when' (на будущее)."""
-    return parse_iso_any(row_get(ev, "ts") or row_get(ev, "when"))
+# ---------- robust readers ----------
 
-# ---------- помощник сборки нарушения ----------
-def mk_violation(rule: Dict[str, Any], message: str, evidence: List[Dict[str, Any]]) -> Dict[str, Any]:
-    return {
-        "rule_id": rule.get("id"),
-        "severity": rule.get("severity", "minor"),
-        "message": message,
-        "evidence": evidence,
-        "sources": rule.get("sources", []),
-    }
+def get_doc(conn, doc_id: str) -> Dict[str, Any]:
+    candidates = [
+        ("SELECT * FROM docs WHERE doc_id=? LIMIT 1", (doc_id,)),
+        ("SELECT * FROM docs WHERE id=? LIMIT 1", (doc_id,)),
+    ]
+    for sql, p in candidates:
+        try:
+            d = _fetch_one(conn, sql, p)
+            if d: return d
+        except: pass
+    return {}
 
-# ---------- загрузка правил ИЗ БД (runtime) ----------
-def load_rules_from_db(pkg_name: str, version: str,
-                       profiles: Optional[List[str]] = None,
-                       include_disabled: bool = False) -> Dict[str, Any] | Dict[str, Dict]:
-    """
-    Читает norm_packages/norm_rules и возвращает rules-словарь той же формы,
-    что и JSON-файл: {'schema_version','package','version','generated_at','rules':[...]}.
-    Требует, чтобы таблицы были созданы (через medqc-norms-admin init/import-*).
-    """
-    try:
-        with db.connect() as c:
-            pkg = c.execute("SELECT * FROM norm_packages WHERE name=? AND version=?",
-                            (pkg_name, version)).fetchone()
-    except sqlite3.OperationalError as e:
-        return {"error": {"code": "NO_NORMS_SCHEMA",
-                          "message": "Таблицы norm_packages/norm_rules не найдены. Выполните: medqc_norms_admin.py init",
-                          "details": str(e)}}
-    if not pkg:
-        return {"error": {"code": "PKG_NOT_FOUND", "message": f"Пакет не найден: {pkg_name}@{version}"}}
+def get_sections(conn, doc_id: str) -> List[Dict[str, Any]]:
+    for ordercol in ("start","idx","pos","rowid"):
+        try:
+            return _fetch_all(conn, f"SELECT * FROM sections WHERE doc_id=? ORDER BY {ordercol}", (doc_id,))
+        except: continue
+    return _fetch_all(conn, "SELECT * FROM sections WHERE doc_id=?", (doc_id,))
 
-    with db.connect() as c:
-        if profiles:
-            qmarks = ",".join(["?"] * len(profiles))
-            rows = c.execute(
-                f"""SELECT * FROM norm_rules WHERE pkg_id=? AND profile IN ({qmarks})
-                    ORDER BY rule_id""",
-                [pkg["pkg_id"], *profiles]
-            ).fetchall()
-        else:
-            rows = c.execute("SELECT * FROM norm_rules WHERE pkg_id=? ORDER BY rule_id",
-                             (pkg["pkg_id"],)).fetchall()
+def get_entities(conn, doc_id: str) -> List[Dict[str, Any]]:
+    return _fetch_all(conn, "SELECT * FROM entities WHERE doc_id=?", (doc_id,))
 
-    out_rules: List[Dict[str, Any]] = []
-    now = datetime.utcnow().date()
-    for r in rows:
-        if (not include_disabled) and int(r["enabled"]) == 0:
-            continue
-        eff_from = r["effective_from"]
-        eff_to = r["effective_to"]
-        # фильтрация по датам действия, если заданы
-        if eff_from:
-            try:
-                if datetime.fromisoformat(eff_from.replace("Z", "").replace(" ", "T")).date() > now:
-                    continue
-            except Exception:
-                pass
-        if eff_to:
-            try:
-                if datetime.fromisoformat(eff_to.replace("Z", "").replace(" ", "T")).date() < now:
-                    continue
-            except Exception:
-                pass
-        item = {
-            "id": r["rule_id"],
-            "title": r["title"],
-            "profile": r["profile"],
-            "severity": r["severity"],
-            "params": json.loads(r["params_json"]) if r["params_json"] else {},
-            "sources": json.loads(r["sources_json"]) if r["sources_json"] else [],
-        }
-        if eff_from:
-            item["effective_from"] = eff_from
-        if eff_to:
-            item["effective_to"] = eff_to
-        out_rules.append(item)
+def get_events(conn, doc_id: str) -> List[Dict[str, Any]]:
+    cols = [r[1] for r in conn.execute("PRAGMA table_info(events)").fetchall()]
+    ts_col = "ts" if "ts" in cols else ("when" if "when" in cols else None)
+    order = f" ORDER BY {ts_col}" if ts_col else ""
+    return _fetch_all(conn, f"SELECT * FROM events WHERE doc_id=?{order}", (doc_id,))
 
-    return {
-        "schema_version": "1.0",
-        "package": pkg_name,
-        "version": version,
-        "generated_at": datetime.utcnow().replace(microsecond=0).isoformat() + "Z",
-        "rules": out_rules
-    }
+# ---------- profiles ----------
 
-# ---------- реализации правил ----------
-def rule_STA_001(rule, doc, sections, entities, events) -> List[Dict[str, Any]]:
-    v: List[Dict[str, Any]] = []
-    admit = parse_iso_any(doc["admit_dt"]) if row_has(doc, "admit_dt") else None
-    if not admit:
-        return v
+def infer_profiles(doc: Dict[str, Any], entities: List[Dict[str, Any]], events: List[Dict[str, Any]]) -> List[str]:
+    profiles = set()
+    admit = discharge = None
 
-    last_ts = None
+    def _ev_ts(ev):
+        ts = ev.get("ts") or ev.get("when")
+        return parse_iso_any(ts)
+
     for ev in events:
-        ts = ev_ts(ev)
-        if ts and (not last_ts or ts > last_ts):
-            last_ts = ts
-    if not last_ts:
-        return v
+        k = (ev.get("kind") or "").lower()
+        if k == "admit":
+            admit = _ev_ts(ev)
+        elif k == "discharge":
+            discharge = _ev_ts(ev)
 
-    days = day_span(admit, last_ts)
-    notes_by_day = {d: False for d in days}
-    for ev in events:
-        if row_get(ev, "kind") != "daily_note":
-            continue
-        ts = ev_ts(ev)
-        if ts and ts.date() in notes_by_day:
-            notes_by_day[ts.date()] = True
+    if admit and discharge:
+        profiles.add("DAY" if admit.date()==discharge.date() else "STA")
+    elif admit:
+        profiles.add("STA")
+    if any((ev.get("kind") or "").lower()=="triage" for ev in events):
+        profiles.add("ER")
 
-    missing = [d for d, ok in notes_by_day.items() if not ok]
-    if missing:
-        msg = "Нет ежедневных записей за даты: " + ", ".join(d.strftime("%d.%m.%Y") for d in missing)
-        v.append(mk_violation(rule, msg, evidence=[{"kind": "daily_note_missing", "dates": [d.isoformat() for d in missing]}]))
-    return v
-
-def rule_STA_002(rule, doc, sections, entities, events) -> List[Dict[str, Any]]:
-    v: List[Dict[str, Any]] = []
-    admit = parse_iso_any(doc["admit_dt"]) if row_has(doc, "admit_dt") else None
-    if not admit:
-        return v
-    init_exam_ts = None
-    for ev in events:
-        if row_get(ev, "kind") == "initial_exam":
-            init_exam_ts = ev_ts(ev)
-            if init_exam_ts:
-                break
-    if not init_exam_ts:
-        v.append(mk_violation(rule, "Нет зафиксированного первичного осмотра при поступлении", evidence=[]))
-        return v
-    max_hours = rule.get("params", {}).get("ПЕРВИЧНЫЙ_ОСМОТР_ЧАСОВ", 6)
-    delta = init_exam_ts - admit
-    if delta.total_seconds() > max_hours * 3600:
-        v.append(mk_violation(rule, f"Первичный осмотр оформлен поздно: +{delta}", evidence=[{"initial_exam": init_exam_ts.isoformat()}]))
-    return v
-
-def rule_STA_006(rule, doc, sections, entities, events) -> List[Dict[str, Any]]:
-    v: List[Dict[str, Any]] = []
-    bad: List[Dict[str, Any]] = []
+    # pediatric / neonatal by age
+    age_days = None
     for e in entities:
-        if row_get(e, "etype") != "medication":
-            continue
-        val = json.loads(row_get(e, "value_json")) if isinstance(row_get(e, "value_json"), str) else row_get(e, "value_json")
-        dose = (val or {}).get("dose")
-        route = (val or {}).get("route")
-        freq = (val or {}).get("freq")
-        have = sum(1 for x in (dose, route, freq) if x)
-        if have < 2:
-            bad.append({"section_id": row_get(e, "section_id"), "start": row_get(e, "start"), "end": row_get(e, "end"), "line": (val or {}).get("line")})
-    if bad:
-        v.append(mk_violation(rule, "В некоторых назначениях отсутствуют ≥2 обязательных атрибутов (доза/путь/кратность)", bad[:20]))
+        if (e.get("etype") or "").lower()=="patient":
+            try:
+                info = json.loads(e.get("value_json") or "{}")
+            except: info={}
+            if isinstance(info.get("age_days"), int):
+                age_days = info["age_days"]
+            elif info.get("dob") and admit:
+                dob = parse_iso_any(info["dob"])
+                if dob: age_days = (admit.date() - dob.date()).days
+            break
+    if age_days is not None:
+        if age_days <= 28: profiles.add("NEO")
+        elif age_days < 18*365: profiles.add("PED")
+
+    dept = (doc.get("dept") or doc.get("department") or "").lower()
+    if "гинек" in dept or "род" in dept or "акуш" in dept: profiles.add("OBG")
+    if "инфек" in dept: profiles.add("INF")
+    if "карди" in dept: profiles.add("CAR")
+    if "нефр" in dept: profiles.add("NEPH")
+    if "ревмат" in dept: profiles.add("RHEUM")
+    if "пульмон" in dept: profiles.add("PUL")
+    if "урол" in dept or "андролог" in dept: profiles.add("URO")
+    if "гастро" in dept or "гепат" in dept: profiles.add("GIH")
+    if "нейрохи" in dept: profiles.add("NEURO")
+    if "травмат" in dept or "ортопед" in dept: profiles.add("TRAUMA")
+    if "онко" in dept and "дет" in dept: profiles.add("PONC")
+    elif "онко" in dept: profiles.add("ONC")
+    if not profiles: profiles.add("STA")
+    return sorted(profiles)
+
+# ---------- load rules ----------
+
+def load_active_rules(conn: sqlite3.Connection, profiles: List[str],
+                      pkg_name: Optional[str]=None, pkg_version: Optional[str]=None) -> List[Dict[str, Any]]:
+    placeholders = ",".join(["?"]*len(profiles)) if profiles else "?"
+    if pkg_name and pkg_version:
+        pkg_filter = """
+          COALESCE(r.package_name, p1.name, p2.name)=? AND
+          COALESCE(r.package_version, p1.version, p2.version)=?
+        """
+        params = profiles + [pkg_name, pkg_version]
+    else:
+        pkg_filter = "COALESCE(p1.active, p2.active, 0)=1"
+        params = profiles
+
+    sql = f"""
+    SELECT
+      r.rule_id,
+      r.profile, r.title, r.severity, r.enabled,
+      COALESCE(r.params_json,'{{}}')         AS params_json,
+      COALESCE(r.sources_json,'[]')          AS sources_json,
+      COALESCE(r.package_name, p1.name, p2.name)     AS package_name,
+      COALESCE(r.package_version, p1.version, p2.version) AS package_version
+    FROM norm_rules r
+    LEFT JOIN norm_packages p1 ON p1.pkg_id = r.pkg_id
+    LEFT JOIN norm_packages p2 ON (p2.name = r.package_name AND p2.version = r.package_version)
+    WHERE r.enabled=1
+      AND r.profile IN ({placeholders})
+      AND ({pkg_filter})
+    ORDER BY r.profile, r.rule_id
+    """
+    cur = conn.execute(sql, params)
+    rows = cur.fetchall()
+    cols = [c[0] for c in cur.description]
+    return [dict(zip(cols, r)) for r in rows]
+
+# ---------- violations (адаптация к схеме) ----------
+
+def _violation_columns(conn: sqlite3.Connection) -> List[str]:
+    cur = conn.execute("PRAGMA table_info(violations)")
+    return [r[1] for r in cur.fetchall()]
+
+def ensure_violations_table(conn: sqlite3.Connection):
+    try:
+        conn.execute("SELECT 1 FROM violations LIMIT 1")
+    except sqlite3.OperationalError:
+        conn.execute("""
+        CREATE TABLE IF NOT EXISTS violations(
+          id INTEGER PRIMARY KEY,
+          doc_id TEXT NOT NULL,
+          rule_id TEXT NOT NULL,
+          severity TEXT NOT NULL,
+          message TEXT NOT NULL,
+          evidence_json TEXT,
+          sources_json TEXT,
+          created_at TEXT NOT NULL
+        );
+        """)
+
+def clear_violations(conn: sqlite3.Connection, doc_id: str):
+    ensure_violations_table(conn)
+    conn.execute("DELETE FROM violations WHERE doc_id=?", (doc_id,))
+
+def insert_violation(conn: sqlite3.Connection, doc_id: str, rule_id: str, severity: Any, message: str,
+                     profile: Optional[str], sources: Optional[List[Dict[str, Any]]],
+                     extra: Optional[Dict[str, Any]] = None):
+    """
+    Гибкая вставка:
+      - если есть колонка profile — пишем туда;
+      - если есть extra_json — пишем туда;
+      - иначе всё это уходит в evidence_json.
+    """
+    cols = _violation_columns(conn)
+    ensure_violations_table(conn)
+
+    sev = str(severity) if severity is not None else "minor"
+    src = norm_json(sources or [])
+    evidence_obj: Dict[str, Any] = {}
+
+    # если в схеме нет profile/extra_json — положим в evidence_json
+    use_profile_col = "profile" in cols
+    use_extra_col = "extra_json" in cols
+    use_evidence = "evidence_json" in cols
+
+    if not use_profile_col:
+        if profile:
+            evidence_obj["profile"] = profile
+    if not use_extra_col and extra:
+        evidence_obj["extra"] = extra
+
+    # Строим INSERT динамически
+    insert_cols = ["doc_id", "rule_id", "severity", "message"]
+    params = [doc_id, rule_id, sev, message]
+
+    if use_profile_col:
+        insert_cols.append("profile")
+        params.append(profile or "")
+
+    if use_evidence:
+        # объединяем с существующим evidence
+        insert_cols.append("evidence_json")
+        params.append(norm_json(evidence_obj) if evidence_obj else None)
+
+    if "sources_json" in cols:
+        insert_cols.append("sources_json")
+        params.append(src)
+
+    if "created_at" in cols:
+        # будем ставить через SQL-выражение
+        created_at_expr = "datetime('now')"
+        columns_sql = ", ".join(insert_cols + ["created_at"])
+        placeholders = ", ".join(["?"] * len(params) + [created_at_expr])
+        sql = f"INSERT INTO violations({columns_sql}) VALUES({placeholders})"
+        conn.execute(sql, params)
+    else:
+        columns_sql = ", ".join(insert_cols)
+        placeholders = ", ".join(["?"] * len(params))
+        sql = f"INSERT INTO violations({columns_sql}) VALUES({placeholders})"
+        conn.execute(sql, params)
+
+# ---------- rule impls (сокращённый набор) ----------
+
+def rule_require_daily_notes(rule, doc, sections, entities, events):
+    v=[]
+    def _ts(ev): return parse_iso_any(ev.get("ts") or ev.get("when"))
+    admit=discharge=None
+    for ev in events:
+        k=(ev.get("kind") or "").lower()
+        if k=="admit": admit=_ts(ev)
+        elif k=="discharge": discharge=_ts(ev)
+    if not admit or not discharge: return v
+    dn=set()
+    for ev in events:
+        if (ev.get("kind") or "").lower()=="daily_note":
+            ts=_ts(ev)
+            if ts: dn.add(ts.date())
+    miss=[]
+    d = day_span(admit,discharge) or 0
+    cur = admit.date()
+    for _ in range(d):
+        if cur not in dn: miss.append(str(cur))
+        cur = cur + timedelta(days=1)
+    if miss:
+        v.append({"message":"Отсутствуют ежедневные записи: "+", ".join(miss),"severity":rule.get("severity","major")})
     return v
 
-def rule_STA_010(rule, doc, sections, entities, events) -> List[Dict[str, Any]]:
-    v: List[Dict[str, Any]] = []
-    epi_ts = None
+def rule_initial_exam_within_hours(rule, doc, sections, entities, events):
+    v=[]
+    try: params=json.loads(rule.get("params_json") or "{}")
+    except: params={}
+    hours=int(params.get("ПЕРВИЧНЫЙ_ОСМОТР_ЧАСОВ",6))
+    def _ts(ev): return parse_iso_any(ev.get("ts") or ev.get("when"))
+    admit_ts=init_ts=None
     for ev in events:
-        if row_get(ev, "kind") == "epicrisis":
-            epi_ts = ev_ts(ev)
-            if epi_ts:
-                break
-    if not epi_ts:
-        v.append(mk_violation(rule, "Отсутствует выписной эпикриз", evidence=[]))
+        k=(ev.get("kind") or "").lower()
+        if k=="admit": admit_ts=_ts(ev)
+        elif k in ("initial_exam","primary_exam"): init_ts=_ts(ev)
+    if not init_ts:
+        for e in entities:
+            if (e.get("etype") or "").lower()=="exam_initial":
+                try: data=json.loads(e.get("value_json") or "{}")
+                except: data={}
+                init_ts=parse_iso_any(data.get("ts") or data.get("when"))
+                if init_ts: break
+    if not admit_ts or not init_ts:
+        v.append({"message":"Нет данных о первичном осмотре/поступлении","severity":rule.get("severity","major")})
         return v
-    last_ts = None
-    for ev in events:
-        ts = ev_ts(ev)
-        if ts and (not last_ts or ts > last_ts):
-            last_ts = ts
-    if last_ts and epi_ts.date() != last_ts.date():
-        v.append(mk_violation(rule, "Эпикриз не датирован днём выписки (по последнему событию)", evidence=[{"epicrisis": epi_ts.date().isoformat(), "last_event": last_ts.date().isoformat()}]))
+    diff=minutes_between(admit_ts,init_ts)
+    if diff is None or diff>hours*60:
+        v.append({"message":f"Первичный осмотр с опозданием ({diff} мин; норма ≤ {hours*60})","severity":"critical"})
     return v
 
-def rule_ER_001(rule, doc, sections, entities, events) -> List[Dict[str, Any]]:
-    v: List[Dict[str, Any]] = []
-    admit = parse_iso_any(doc["admit_dt"]) if row_has(doc, "admit_dt") else None
-    triage_ts = None
+def rule_discharge_summary_on_discharge_date(rule, doc, sections, entities, events):
+    v=[]; discharge=None
     for ev in events:
-        if row_get(ev, "kind") == "triage":
-            triage_ts = ev_ts(ev)
-            if triage_ts:
-                break
-    if not (admit and triage_ts):
-        return v
-    max_min = rule.get("params", {}).get("TRIAGE_MAX_MIN", 15)
-    delta = triage_ts - admit
-    if delta.total_seconds() > max_min * 60:
-        v.append(mk_violation(rule, f"Триаж выполнен поздно: +{delta}", evidence=[{"admit": row_get(doc, "admit_dt")}, {"triage": triage_ts.isoformat()}]))
+        if (ev.get("kind") or "").lower()=="discharge":
+            discharge=parse_iso_any(ev.get("ts") or ev.get("when")); break
+    if not discharge: return v
+    epi_dates=set()
+    for e in entities:
+        if (e.get("etype") or "").lower() in ("discharge_summary","epicrisis"):
+            try: data=json.loads(e.get("value_json") or "{}")
+            except: data={}
+            ts=parse_iso_any(data.get("ts") or data.get("when"))
+            if ts: epi_dates.add(ts.date())
+    if discharge.date() not in epi_dates:
+        v.append({"message":"Выписной эпикриз не датирован днём выписки","severity":rule.get("severity","major")})
     return v
 
-def rule_ER_004(rule, doc, sections, entities, events) -> List[Dict[str, Any]]:
-    v: List[Dict[str, Any]] = []
-    admit = parse_iso_any(row_get(doc, "admit_dt"))
-    if not admit:
-        return v
-    ecg_ts = None
+def rule_triage_within_minutes(rule, doc, sections, entities, events):
+    v=[]
+    try: params=json.loads(rule.get("params_json") or "{}")
+    except: params={}
+    limit=int(params.get("TRIAGE_MAX_MIN",15))
+    def _ts(ev): return parse_iso_any(ev.get("ts") or ev.get("when"))
+    admit_ts=triage_ts=None
     for ev in events:
-        if row_get(ev, "kind") == "ecg":
-            t = ev_ts(ev)
-            if t and (not ecg_ts or t < ecg_ts):
-                ecg_ts = t
-    if not ecg_ts:
+        k=(ev.get("kind") or "").lower()
+        if k=="admit": admit_ts=_ts(ev)
+        elif k=="triage": triage_ts=_ts(ev)
+    if not admit_ts or not triage_ts:
+        v.append({"message":"Нет данных о времени триажа/поступления","severity":rule.get("severity","major")})
         return v
-    max_min = rule.get("params", {}).get("ECG_MAX_MIN", 10)
-    delta = ecg_ts - admit
-    if delta.total_seconds() > max_min * 60:
-        v.append(mk_violation(rule, f"ЭКГ выполнено поздно: +{delta}", evidence=[{"admit": row_get(doc, "admit_dt")}, {"ecg": ecg_ts.isoformat()}]))
+    d=minutes_between(admit_ts,triage_ts)
+    if d is None or d>limit:
+        v.append({"message":f"Триаж с опозданием ({d} мин; норма ≤ {limit})","severity":"critical"})
+    return v
+
+def _has_chest_pain(entities):
+    for e in entities:
+        if (e.get("etype") or "").lower() in ("complaint","symptom"):
+            val=(e.get("value_json") or "").lower()
+            if "боль в груд" in val or "загрудин" in val: return True
+    return False
+
+def rule_ecg_on_chest_pain(rule, doc, sections, entities, events):
+    v=[]
+    try: params=json.loads(rule.get("params_json") or "{}")
+    except: params={}
+    limit=int(params.get("ECG_MAX_MIN",10))
+    if not _has_chest_pain(entities): return v
+    def _ts(ev): return parse_iso_any(ev.get("ts") or ev.get("when"))
+    admit_ts=ecg_ts=None
+    for ev in events:
+        k=(ev.get("kind") or "").lower()
+        if k=="admit": admit_ts=_ts(ev)
+        elif k=="ecg": ecg_ts=_ts(ev)
+    if not admit_ts or not ecg_ts:
+        v.append({"message":"Нет данных о времени ЭКГ/поступления","severity":rule.get("severity","major")})
+        return v
+    d=minutes_between(admit_ts,ecg_ts)
+    if d is None or d>limit:
+        v.append({"message":f"ЭКГ выполнена поздно ({d} мин; норма ≤ {limit})","severity":"critical"})
+    return v
+
+def rule_med_orders_attributes(rule, doc, sections, entities, events):
+    v=[]; bad=0; total=0
+    for e in entities:
+        if (e.get("etype") or "").lower()=="med_order":
+            total+=1
+            try: x=json.loads(e.get("value_json") or "{}")
+            except: x={}
+            attrs = int(bool(x.get("dose"))) + int(bool(x.get("route"))) + int(bool(x.get("freq") or x.get("frequency")))
+            if attrs<2: bad+=1
+    if total>0 and bad>0:
+        v.append({"message":f"Неполные назначения: {bad} из {total} (доза/путь/кратность)","severity":rule.get("severity","major")})
+    return v
+
+def rule_infection_isolation_present(rule, doc, sections, entities, events):
+    v=[]; found=False
+    for e in entities:
+        et=(e.get("etype") or "").lower()
+        if et in ("isolation","infection_control"): found=True; break
+        if et in ("text_hint","note"):
+            val=(e.get("value_json") or "").lower()
+            if any(w in val for w in ["изоляц","бокс","контактная изоляция"]): found=True; break
+    if not found:
+        v.append({"message":"Нет отметки об изоляции/режиме инфекционной безопасности","severity":rule.get("severity","major")})
+    return v
+
+def rule_cbc_within_24h(rule, doc, sections, entities, events):
+    v=[]; admit_ts=None
+    for ev in events:
+        if (ev.get("kind") or "").lower()=="admit":
+            admit_ts=parse_iso_any(ev.get("ts") or ev.get("when")); break
+    if not admit_ts: return v
+    lab_ts=None
+    for ev in events:
+        if (ev.get("kind") or "").lower()=="lab":
+            try: data=json.loads(ev.get("value_json") or "{}")
+            except: data={}
+            name=(data.get("name") or "").lower()
+            if any(w in name for w in ["оак","общий анализ крови","cbc","hemogram","hemogramme"]):
+                lab_ts=parse_iso_any(ev.get("ts") or ev.get("when")); break
+    if not lab_ts:
+        v.append({"message":"Нет ОАК в первые 24 часа","severity":"minor"}); return v
+    d=minutes_between(admit_ts,lab_ts)
+    if d is None or d>24*60:
+        v.append({"message":"ОАК позже 24 часов","severity":"minor"})
     return v
 
 RULE_IMPLS = {
-    "STA-001": rule_STA_001,
-    "STA-002": rule_STA_002,
-    "STA-006": rule_STA_006,
-    "STA-010": rule_STA_010,
-    "ER-001":  rule_ER_001,
-    "ER-004":  rule_ER_004,
+    "STA-001": rule_require_daily_notes,
+    "OBG-001": rule_require_daily_notes,
+    "PED-001": rule_require_daily_notes,
+    "RHEUM-001": rule_require_daily_notes,
+    "PUL-001": rule_require_daily_notes,
+    "GIH-001": rule_require_daily_notes,
+    "NEPH-001": rule_require_daily_notes,
+    "URO-001": rule_require_daily_notes,
+    "TRAUMA-001": rule_require_daily_notes,
+    "NEURO-001": rule_require_daily_notes,
+    "HEM-001": rule_require_daily_notes,
+    "ONC-001": rule_require_daily_notes,
+    "PONC-001": rule_require_daily_notes,
+
+    "STA-002": rule_initial_exam_within_hours,
+    "OBG-002": rule_initial_exam_within_hours,
+    "PED-002": rule_initial_exam_within_hours,
+    "NEO-002": rule_initial_exam_within_hours,
+
+    "STA-006": rule_med_orders_attributes,
+    "INF-001": rule_infection_isolation_present,
+    "STA-010": rule_discharge_summary_on_discharge_date,
+
+    "ER-001": rule_triage_within_minutes,
+    "ER-004": rule_ecg_on_chest_pain,
+    "CAR-001": rule_ecg_on_chest_pain,
+
+    "INF-010": rule_cbc_within_24h,
+    "STA-020": rule_cbc_within_24h,
 }
 
-# ---------- основной процесс ----------
-def ensure_violations_schema():
-    with db.connect() as c:
-        c.executescript(VIOLATIONS_SCHEMA)
-        c.commit()
+# ---------- run ----------
 
-def write_violations(doc_id: str, violations: List[Dict[str, Any]]):
-    ensure_violations_schema()
-    with db.connect() as c:
-        c.execute("DELETE FROM violations WHERE doc_id=?", (doc_id,))
-        c.executemany(
-            """
-            INSERT INTO violations(doc_id, rule_id, severity, message, evidence_json, sources_json, created_at)
-            VALUES(?,?,?,?,?,?,datetime('now'))
-            """,
-            (
-                (
-                    doc_id,
-                    v.get("rule_id"),
-                    v.get("severity", "minor"),
-                    v.get("message", ""),
-                    json.dumps(v.get("evidence", []), ensure_ascii=False),
-                    json.dumps(v.get("sources", []), ensure_ascii=False),
+def run_rules(doc_id: str, pkg_name: Optional[str]=None, pkg_version: Optional[str]=None) -> Dict[str, Any]:
+    with sqlite3.connect(DB_PATH) as conn:
+        doc = get_doc(conn, doc_id)
+        sections = get_sections(conn, doc_id)
+        entities  = get_entities(conn, doc_id)
+        events = get_events(conn, doc_id)
+
+        profiles = infer_profiles(doc, entities, events)
+        rules = load_active_rules(conn, profiles, pkg_name, pkg_version)
+
+        clear_violations(conn, doc_id)
+        stored=0
+        for r in rules:
+            rid = r["rule_id"]
+            impl = RULE_IMPLS.get(rid)
+            if not impl:
+                continue
+            viols = impl(r, doc, sections, entities, events) or []
+            for v in viols:
+                insert_violation(
+                    conn, doc_id, rid,
+                    v.get("severity") or r.get("severity") or "minor",
+                    v.get("message") or r.get("title") or rid,
+                    r.get("profile"),
+                    json.loads(r.get("sources_json") or "[]"),
+                    extra={"package":{"name": r.get("package_name"), "version": r.get("package_version")}}
                 )
-                for v in violations
-            ),
-        )
-        c.commit()
+                stored += 1
+        conn.commit()
+        return {"doc_id": doc_id, "profiles": profiles, "rules": len(rules), "violations": stored}
 
-def run_rules(doc_id: str, rules: Dict[str, Any]) -> Dict[str, Any]:
-    db.init_schema()
-
-    doc = db.get_doc(doc_id)
-    if not doc:
-        return {"error": {"code": "NO_DOC", "message": f"unknown doc_id {doc_id}"}}
-
-    sections = db.get_sections(doc_id)
-    if not sections:
-        return {"error": {"code": "NO_SECTIONS", "message": "run medqc-section first"}}
-
-    events = db.get_events(doc_id)
-    if not events:
-        return {"error": {"code": "NO_EVENTS", "message": "run medqc-timeline first"}}
-
-    entities = db.get_entities(doc_id)
-
-    violations: List[Dict[str, Any]] = []
-    for rule in rules.get("rules", []):
-        impl = RULE_IMPLS.get(rule.get("id"))
-        if not impl:
-            continue
-        vlist = impl(rule, doc, sections, entities, events)
-        for v in vlist:
-            if (not v.get("sources")) and rule.get("sources"):
-                v["sources"] = rule["sources"]
-        violations.extend(vlist)
-
-    write_violations(doc_id, violations)
-    return {
-        "doc_id": doc_id,
-        "status": "rules",
-        "violations": [{"rule_id": v["rule_id"], "severity": v["severity"], "message": v["message"]} for v in violations],
-        "count": len(violations)
-    }
-
-# ---------- CLI ----------
 def main():
-    ap = argparse.ArgumentParser(description="medqc-rules — применение правил качества (JSON или runtime из БД)")
+    import argparse
+    ap = argparse.ArgumentParser()
     ap.add_argument("--doc-id", required=True)
-    # режим 1: файл JSON
-    ap.add_argument("--rules", help="Путь к rules.json (замороженный файл)")
-    # режим 2: чтение из БД
-    ap.add_argument("--pkg", help="Имя пакета правил в БД (norm_packages.name)")
-    ap.add_argument("--version", help="Версия пакета правил (norm_packages.version)")
-    ap.add_argument("--profiles", help="Фильтр профилей, через запятую (например: STA,ER)")
-    ap.add_argument("--include-disabled", action="store_true", help="Включать отключённые правила")
-    args = ap.parse_args()
-
-    # приоритет: файл > БД > дефолт
-    if args.rules:
-        with open(args.rules, "r", encoding="utf-8") as f:
-            rules = json.load(f)
-    elif args.pkg and args.version:
-        profiles = [p.strip() for p in args.profiles.split(",")] if args.profiles else None
-        rules = load_rules_from_db(args.pkg, args.version, profiles, args.include_disabled)
-        if "error" in rules:
-            print(json.dumps(rules, ensure_ascii=False, indent=2))
-            return
-    else:
-        rules = DEFAULT_RULES
-
-    res = run_rules(args.doc_id, rules)
-    print(json.dumps(res, ensure_ascii=False, indent=2))
+    ap.add_argument("--package-name", default=None)
+    ap.add_argument("--package-version", default=None)
+    a = ap.parse_args()
+    print(json.dumps(run_rules(a.doc_id, a.package_name, a.package_version), ensure_ascii=False, indent=2))
 
 if __name__ == "__main__":
     main()

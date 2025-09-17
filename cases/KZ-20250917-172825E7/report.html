@@ -1,0 +1,85 @@
+
+<!doctype html>
+<html lang=ru>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Отчёт medqc — KZ-20250917-172825E7</title>
+<style>
+  :root { --fg:#111; --muted:#666; --bg:#fff; --acc:#0b6cff; --crit:#d92b2b; --maj:#d98e2b; --min:#4a9c2b; }
+  body { font: 14px/1.45 system-ui, -apple-system, Segoe UI, Roboto, sans-serif; color:var(--fg); background:var(--bg); margin: 24px; }
+  h1 { font-size: 20px; margin: 0 0 8px; }
+  h2 { font-size: 16px; margin: 24px 0 8px; }
+  .muted { color: var(--muted); }
+  .grid { display: grid; grid-template-columns: repeat(4, minmax(0,1fr)); gap: 12px; }
+  .card { border:1px solid #e6e6e6; border-radius:12px; padding:12px; box-shadow:0 1px 2px rgba(0,0,0,.03); }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { padding: 6px 8px; border-bottom: 1px solid #eee; text-align: left; vertical-align: top; }
+  th { background:#fafafa; position: sticky; top:0; z-index:10; }
+  code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  .pill { display:inline-block; padding:2px 8px; border-radius:999px; font-weight:600; font-size:12px; }
+  .crit { background:#fde3e3; color:#7a0c0c; }
+  .maj  { background:#fff1db; color:#7a4b0c; }
+  .min  { background:#eaf6ea; color:#2d5c1a; }
+  .kv { display:flex; gap:8px; align-items:center; }
+  .sep { height:1px; background:#eee; margin:16px 0; }
+  .small { font-size:12px; }
+  .nowrap { white-space: nowrap; }
+</style>
+</head>
+<body>
+
+    <h1>Отчёт по документу <span class="mono">KZ-20250917-172825E7</span></h1>
+    <div class="grid">
+      <div class="card">
+        <h2>Метаданные</h2>
+        <table>
+          <tr><th class="small">Документ</th><td>KZ-20250917-172825E7</td></tr><tr><th class="small">Организация</th><td>—</td></tr><tr><th class="small">Отделение</th><td>—</td></tr><tr><th class="small">Автор</th><td>—</td></tr><tr><th class="small">Поступление</th><td>—</td></tr><tr><th class="small">Источник</th><td>/Users/shrvse/medqc/cases/KZ-20250917-172825E7/source.pdf</td></tr><tr><th class="small">Страниц</th><td>3</td></tr><tr><th class="small">Извлечено символов</th><td>8967</td></tr>
+        </table>
+      </div>
+      <div class="card">
+        <h2>Нарушения</h2>
+        
+    <div class="kv"><span class="pill crit">Critical: 0</span>
+    <span class="pill maj">Major: 0</span>
+    <span class="pill min">Minor: 0</span></div>
+    
+      </div>
+      <div class="card">
+        <h2>Сущности</h2>
+        <table><tr><th class="small">datetime</th><td>5</td></tr><tr><th class="small">diagnosis</th><td>3</td></tr></table>
+      </div>
+      <div class="card">
+        <h2>События</h2>
+        <table><tr><th class="small">epicrisis</th><td>2</td></tr><tr><th class="small">diagnosis</th><td>3</td></tr><tr><th class="small">ecg</th><td>1</td></tr></table>
+        <div class="small muted">Последнее событие: 2025-02-17T11:32:00</div>
+      </div>
+    </div>
+    
+    <h2>Нарушения (0)</h2>
+    <div class="card">
+      <table>
+        <thead><tr><th>Правило</th><th>Сообщение</th><th>Доказательство</th><th>Уровень</th></tr></thead>
+        <tbody><tr><td colspan=4 class=muted>Нет нарушений</td></tr></tbody>
+      </table>
+    </div>
+    
+    <h2>События (первые 6 из 6)</h2>
+    <div class="card">
+      <table>
+        <thead><tr><th>Время</th><th>Тип</th><th>Секция</th><th>Детали</th> </tr></thead>
+        <tbody><tr><td class=nowrap>1976-09-12T00:00</td><td>epicrisis</td><td class=mono>S2</td><td class=small>name: Эпикриз</td></tr><tr><td class=nowrap>1976-09-12T00:00</td><td>diagnosis</td><td class=mono>S2</td><td class=small>icd: G93.9</td></tr><tr><td class=nowrap>1976-09-12T00:00</td><td>diagnosis</td><td class=mono>S2</td><td class=small>icd: I11.9</td></tr><tr><td class=nowrap>1976-09-12T00:00</td><td>diagnosis</td><td class=mono>S2</td><td class=small>icd: E11.6</td></tr><tr><td class=nowrap>2025-02-17T11:32</td><td>epicrisis</td><td class=mono>S1</td><td class=small>name: Эпикриз</td></tr><tr><td class=nowrap>—</td><td>ecg</td><td class=mono>S11</td><td class=small>name: ЭКГ</td></tr></tbody>
+      </table>
+    </div>
+    
+    <h2>Секции (первые 14 из 14)</h2>
+    <div class="card">
+      <table>
+        <thead><tr><th>ID</th><th>Название</th><th>Тип</th><th>Диапазон</th></tr></thead>
+        <tbody><tr><td class=mono>S1</td><td>Эпикриз</td><td>epicrisis</td><td class=small>0–416</td></tr><tr><td class=mono>S2</td><td>Эпикриз</td><td>epicrisis</td><td class=small>416–2513</td></tr><tr><td class=mono>S3</td><td>Показатели здоровья</td><td>vitals</td><td class=small>2513–2853</td></tr><tr><td class=mono>S4</td><td>Показатели здоровья</td><td>vitals</td><td class=small>2853–3309</td></tr><tr><td class=mono>S5</td><td>Показатели здоровья</td><td>vitals</td><td class=small>3309–3373</td></tr><tr><td class=mono>S6</td><td>Показатели здоровья</td><td>vitals</td><td class=small>3373–3409</td></tr><tr><td class=mono>S7</td><td>Показатели здоровья</td><td>vitals</td><td class=small>3409–5043</td></tr><tr><td class=mono>S8</td><td>Показатели здоровья</td><td>vitals</td><td class=small>5043–5060</td></tr><tr><td class=mono>S9</td><td>Показатели здоровья</td><td>vitals</td><td class=small>5060–6768</td></tr><tr><td class=mono>S10</td><td>Показатели здоровья</td><td>vitals</td><td class=small>6768–7894</td></tr><tr><td class=mono>S11</td><td>ЭКГ</td><td>ecg</td><td class=small>7894–8102</td></tr><tr><td class=mono>S12</td><td>Показатели здоровья</td><td>vitals</td><td class=small>8102–8285</td></tr><tr><td class=mono>S13</td><td>Показатели здоровья</td><td>vitals</td><td class=small>8285–8353</td></tr><tr><td class=mono>S14</td><td>Показатели здоровья</td><td>vitals</td><td class=small>8353–8967</td></tr></tbody>
+      </table>
+    </div>
+    
+    <div class="sep"></div>
+    <div class="small muted">Сгенерировано medqc-report • 2025-09-17T13:36:32.209210Z</div>
+</body></html>
