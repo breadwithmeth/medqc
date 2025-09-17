@@ -57,8 +57,9 @@ API_PREFIX = "/v1"
 HERE = Path(__file__).resolve().parent
 PY = os.getenv("PYTHON", "") or "python"
 API_KEY = os.getenv("MEDQC_API_KEY", "")
-DB_PATH = db.DB_PATH
-
+DB_PATH = os.getenv("MEDQC_DB", "/app/medqc.db")
+DEFAULT_RULES_PACKAGE = os.getenv("DEFAULT_RULES_PACKAGE", "kz-standards")
+DEFAULT_RULES_VERSION = os.getenv("DEFAULT_RULES_VERSION", "2025-09-17")
 # ----------- FastAPI -----------
 app = FastAPI(title="medqc-api", version="0.1", openapi_url=f"{API_PREFIX}/openapi.json")
 app.add_middleware(
