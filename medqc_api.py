@@ -47,6 +47,11 @@ from pydantic import BaseModel, Field
 
 import medqc_db as db
 
+
+
+
+
+
 # ----------- конфигурация -----------
 API_PREFIX = "/v1"
 HERE = Path(__file__).resolve().parent
@@ -54,6 +59,13 @@ PY = os.getenv("PYTHON", "") or "python"
 API_KEY = os.getenv("MEDQC_API_KEY", "")
 DB_PATH = db.DB_PATH
 
+# ----------- FastAPI -----------
+app = FastAPI(title="medqc-api", version="0.1", openapi_url=f"{API_PREFIX}/openapi.json")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=os.getenv("CORS_ALLOW_ORIGINS", "*").split(","),
+    allow_credentials=True, allow_methods=["*"], allow_headers=["*"],
+)
 # пути до CLI-скриптов (используем их как «воркеры» шагов)
 SCRIPTS = {
     'extract': HERE / 'medqc_extract.py',
@@ -88,13 +100,6 @@ def run_cmd(argv: List[str]) -> Dict[str, Any]:
 def bool_q(v: Optional[str]) -> bool:
     return str(v).lower() in ("1","true","yes","y","on")
 
-# ----------- FastAPI -----------
-app = FastAPI(title="medqc-api", version="0.1", openapi_url=f"{API_PREFIX}/openapi.json")
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=os.getenv("CORS_ALLOW_ORIGINS", "*").split(","),
-    allow_credentials=True, allow_methods=["*"], allow_headers=["*"],
-)
 
 # ----------- схемы запросов/ответов -----------
 class PipelineBody(BaseModel):
