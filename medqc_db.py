@@ -7,9 +7,48 @@ import json
 import sqlite3
 from typing import Any, Dict, List, Optional, Tuple
 import glob
+from typing import Iterable, Mapping
 
 DB_PATH = os.getenv("MEDQC_DB", "./medqc.db")
 UPLOADS_DIR = os.getenv("MEDQC_UPLOADS", "/app/uploads")
+
+
+
+
+def _val(d: Mapping, *keys, default=None):
+    for k in keys:
+        if k in d and d[k] is not None:
+            return d[k]
+    return default
+
+def replace_sections(doc_id: str, rows: Iterable[Mapping]):
+    """
+    Полностью заменяет секции документа.
+    rows — итерируемая коллекция dict-подобных объектов.
+    Поддерживает ключи: idx, start, end, title, name, text  (избыточные — игнорируются).
+    """
+    with get_conn() as conn:
+        _ensure_sections_schema(conn)
+        conn.execute("DELETE FROM sections WHERE doc_id=?", (doc_id,))
+        payload = []
+        for r in rows:
+            payload.append((
+                doc_id,
+                _val(r, "idx", "index", default=None),
+                _val(r, "start", default=None),
+                _val(r, "end", default=None),
+                _val(r, "title", default=None),
+                _val(r, "name", default=None),
+                _val(r, "text", "content", default="")
+            ))
+        if payload:
+            conn.executemany("""
+                INSERT INTO sections(doc_id, idx, start, "end", title, name, text, created_at)
+                VALUES(?,?,?,?,?,?,?, datetime('now'))
+            """, payload)
+        conn.commit()
+
+
 
 
 # ---------- low-level ----------
@@ -221,3 +260,93 @@ def ensure_extract_tables(conn: sqlite3.Connection):
             created_at TEXT NOT NULL DEFAULT (datetime('now'))
         );
     """)
+def _ensure_table(conn: sqlite3.Connection, create_sql: str):
+    conn.execute(create_sql)
+
+def _ensure_sections_schema(conn: sqlite3.Connection):
+    # создать если нет
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS sections(
+            id         INTEGER PRIMARY KEY,
+            doc_id     TEXT NOT NULL,
+            idx        INTEGER,
+            start      INTEGER,
+            "end"      INTEGER,
+            title      TEXT,
+            name       TEXT,
+            text       TEXT,
+            created_at TEXT
+        );
+    """)
+    # мягко добавить недостающие колонки
+    _ensure_column_simple(conn, "sections", "idx",  "INTEGER")
+    _ensure_column_simple(conn, "sections", "start","INTEGER")
+    _ensure_column_simple(conn, "sections", "end",  "INTEGER")
+    _ensure_column_simple(conn, "sections", "title","TEXT")
+    _ensure_column_simple(conn, "sections", "name", "TEXT")
+    _ensure_column_simple(conn, "sections", "text", "TEXT")
+    if "created_at" not in _table_columns(conn, "sections"):
+        conn.execute("ALTER TABLE sections ADD COLUMN created_at TEXT")
+        conn.execute("UPDATE sections SET created_at = datetime('now') WHERE created_at IS NULL")
+    # индексы
+    try:
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_sections_doc ON sections(doc_id, idx)")
+    except Exception:
+        pass
+
+
+def _ensure_entities_schema(conn: sqlite3.Connection):
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS entities(
+            id         INTEGER PRIMARY KEY,
+            doc_id     TEXT NOT NULL,
+            etype      TEXT,
+            value_json TEXT,
+            span_start INTEGER,
+            span_end   INTEGER,
+            created_at TEXT
+        );
+    """)
+    _ensure_column_simple(conn, "entities", "etype", "TEXT")
+    _ensure_column_simple(conn, "entities", "value_json", "TEXT")
+    _ensure_column_simple(conn, "entities", "span_start", "INTEGER")
+    _ensure_column_simple(conn, "entities", "span_end", "INTEGER")
+    if "created_at" not in _table_columns(conn, "entities"):
+        conn.execute("ALTER TABLE entities ADD COLUMN created_at TEXT")
+        conn.execute("UPDATE entities SET created_at = datetime('now') WHERE created_at IS NULL")
+    try:
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_entities_doc ON entities(doc_id)")
+    except Exception:
+        pass
+
+def replace_entities(doc_id: str, rows: Iterable[Mapping]):
+    """
+    Полностью заменяет сущности документа.
+    rows — dict-подобные объекты с ключами: etype, value_json|value, span_start|start, span_end|end.
+    """
+    with get_conn() as conn:
+        _ensure_entities_schema(conn)
+        conn.execute("DELETE FROM entities WHERE doc_id=?", (doc_id,))
+        payload = []
+        for r in rows:
+            val = _val(r, "value_json", default=None)
+            if val is None:
+                # если пришёл python-объект в "value" — сериализуем
+                vobj = _val(r, "value", default={})
+                try:
+                    val = json.dumps(vobj, ensure_ascii=False)
+                except Exception:
+                    val = "{}"
+            payload.append((
+                doc_id,
+                _val(r, "etype", default=None),
+                val,
+                _val(r, "span_start", "start", default=None),
+                _val(r, "span_end", "end", default=None),
+            ))
+        if payload:
+            conn.executemany("""
+                INSERT INTO entities(doc_id, etype, value_json, span_start, span_end, created_at)
+                VALUES(?,?,?,?,?, datetime('now'))
+            """, payload)
+        conn.commit()
