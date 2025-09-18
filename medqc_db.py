@@ -169,7 +169,6 @@ CREATE TABLE IF NOT EXISTS raw(
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 """
-
 def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
     try:
         rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
@@ -177,17 +176,18 @@ def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
     except Exception:
         return set()
 
-def _ensure_column(conn: sqlite3.Connection, table: str, col: str, decl: str):
+def _ensure_column_simple(conn: sqlite3.Connection, table: str, col: str, decl: str):
+    """Простое добавление колонки без неконстантных DEFAULT."""
     cols = _table_columns(conn, table)
     if col not in cols:
         conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
 
 def ensure_extract_tables(conn: sqlite3.Connection):
     """
-    Гарантируем, что есть таблицы pages/raw с нужными колонками.
-    Если pages уже существовала по старой схеме, мягко добавим недостающие столбцы.
+    Создаём/мигрируем pages/raw. Для уже существующих таблиц мягко добавляем недостающие столбцы.
+    Важно: при ALTER TABLE не используем неконстантные DEFAULT (sqlite не поддерживает).
     """
-    # 1) создать, если вообще нет
+    # pages: создать если нет (с дефолтами допустимыми при CREATE)
     conn.execute("""
         CREATE TABLE IF NOT EXISTS pages(
             id         INTEGER PRIMARY KEY,
@@ -197,18 +197,23 @@ def ensure_extract_tables(conn: sqlite3.Connection):
             created_at TEXT NOT NULL DEFAULT (datetime('now'))
         );
     """)
-    # 2) мягкая миграция существующей схемы
-    _ensure_column(conn, "pages", "idx",  "INTEGER")
-    _ensure_column(conn, "pages", "text", "TEXT")
-    _ensure_column(conn, "pages", "created_at", "TEXT NOT NULL DEFAULT (datetime('now'))")
 
-    # индексы (игнорируем ошибку, если уже созданы)
+    # мягкая миграция существующей pages
+    _ensure_column_simple(conn, "pages", "idx",  "INTEGER")
+    _ensure_column_simple(conn, "pages", "text", "TEXT")
+    # created_at добавляем как TEXT без DEFAULT, затем проставляем значения там, где NULL
+    cols = _table_columns(conn, "pages")
+    if "created_at" not in cols:
+        conn.execute(f"ALTER TABLE pages ADD COLUMN created_at TEXT")
+        conn.execute("UPDATE pages SET created_at = datetime('now') WHERE created_at IS NULL")
+
+    # индекс (идемпотентно)
     try:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_pages_doc ON pages(doc_id, idx)")
     except Exception:
         pass
 
-    # raw
+    # raw: создать если нет
     conn.execute("""
         CREATE TABLE IF NOT EXISTS raw(
             doc_id     TEXT PRIMARY KEY,
