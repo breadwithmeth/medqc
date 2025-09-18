@@ -350,3 +350,21 @@ def replace_entities(doc_id: str, rows: Iterable[Mapping]):
                 VALUES(?,?,?,?,?, datetime('now'))
             """, payload)
         conn.commit()
+
+
+def get_sections(doc_id: str) -> list[dict]:
+    """
+    Возвращает список секций документа.
+    Каждая секция: dict с ключами id, doc_id, idx, start, end, title, name, text, created_at.
+    """
+    with get_conn() as conn:
+        try:
+            cur = conn.execute(
+                "SELECT id, doc_id, idx, start, \"end\", title, name, text, created_at "
+                "FROM sections WHERE doc_id=? ORDER BY idx",
+                (doc_id,)
+            )
+            cols = [d[0] for d in cur.description]
+            return [dict(zip(cols, row)) for row in cur.fetchall()]
+        except Exception:
+            return []
