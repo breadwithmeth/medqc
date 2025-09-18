@@ -136,17 +136,43 @@ def get_doc_file_path(conn: sqlite3.Connection, doc_id: str) -> Optional[str]:
 
 
 # ---------- generic readers used by rules/timeline ----------
+def get_sections(*args, **kwargs) -> list[dict]:
+    """
+    Универсальный доступ к секциям документа.
+    Поддерживает вызовы:
+      get_sections(doc_id)
+      get_sections(conn, doc_id)
+    """
+    # разбор аргументов
+    if len(args) == 1:
+        conn = get_conn()
+        doc_id = args[0]
+        should_close = True
+    elif len(args) == 2:
+        conn, doc_id = args
+        should_close = False
+    else:
+        raise TypeError("get_sections expects (doc_id) or (conn, doc_id)")
 
-def get_sections(conn: sqlite3.Connection, doc_id: str) -> List[Dict[str, Any]]:
-    # пробуем распространённые варианты сортировки
-    for order_col in ("start", "idx", "pos", "rowid"):
-        try:
-            cur = conn.execute(f"SELECT * FROM sections WHERE doc_id=? ORDER BY {order_col}", (doc_id,))
-            return list(dicts(cur, cur.fetchall()))
-        except Exception:
-            continue
-    cur = conn.execute("SELECT * FROM sections WHERE doc_id=?", (doc_id,))
-    return list(dicts(cur, cur.fetchall()))
+    try:
+        cur = conn.execute(
+            "SELECT id, doc_id, idx, start, \"end\", title, name, text, kind, created_at "
+            "FROM sections WHERE doc_id=? ORDER BY idx",
+            (doc_id,)
+        )
+        cols = [c[0] for c in cur.description]
+        rows = []
+        for rec in cur.fetchall():
+            row = dict(zip(cols, rec))
+            # Алиас для совместимости
+            row.setdefault("section_id", row.get("id"))
+            row.setdefault("kind", None)
+            rows.append(row)
+        return rows
+    finally:
+        if should_close:
+            conn.close()
+
 
 
 def get_entities(conn: sqlite3.Connection, doc_id: str) -> List[Dict[str, Any]]:
