@@ -3,6 +3,7 @@ import re
 import json
 import sqlite3
 from datetime import datetime, timedelta
+from typing import List
 
 # ====== НОРМАЛИЗАЦИЯ РУССКИХ СИНОНИМОВ ======
 RU_EVENT_SYNONYMS = {
