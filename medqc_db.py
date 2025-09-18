@@ -15,8 +15,11 @@ UPLOADS_DIR = os.getenv("MEDQC_UPLOADS", "/app/uploads")
 # Базовые утилиты
 # ----------------------------------------------------------------------
 
-def get_conn(path: Optional[str] = None) -> sqlite3.Connection:
-    return sqlite3.connect(path or DB_PATH)
+def get_conn():
+    db = os.getenv("MEDQC_DB", "/app/medqc.db")
+    conn = sqlite3.connect(db)
+    conn.row_factory = sqlite3.Row
+    return conn
 
 def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
     try:
@@ -204,19 +207,31 @@ def ensure_extract_tables(conn: sqlite3.Connection):
     """)
 
 def get_full_text(doc_id: str) -> str:
-    with get_conn() as conn:
+    """
+    Возвращает «сырой» текст документа.
+    Сначала пробует raw.content, если нет — собирает из artifacts(kind='text_pages').
+    """
+    conn = get_conn()
+    try:
+        # 1) пробуем raw
         cur = conn.execute("SELECT content FROM raw WHERE doc_id=?", (doc_id,))
-        row = cur.fetchone()
-        if row and row[0]:
-            return row[0]
-        try:
-            cur = conn.execute("SELECT text FROM pages WHERE doc_id=? ORDER BY idx", (doc_id,))
-            parts = [r[0] or "" for r in cur.fetchall()]
-            if parts:
-                return "\n\n".join(parts)
-        except Exception:
-            pass
-    return ""
+        r = cur.fetchone()
+        if r and r["content"]:
+            return r["content"]
+        # 2) собираем из artifacts
+        cur = conn.execute("SELECT content FROM artifacts WHERE doc_id=? AND kind='text_pages'", (doc_id,))
+        a = cur.fetchone()
+        if a and a["content"]:
+            try:
+                pages = json.loads(a["content"])
+                if isinstance(pages, list):
+                    return "\n\n".join(pages)
+                return str(a["content"])
+            except Exception:
+                return str(a["content"])
+        return ""
+    finally:
+        conn.close()
 
 # ----------------------------------------------------------------------
 # sections: schema + replace/get

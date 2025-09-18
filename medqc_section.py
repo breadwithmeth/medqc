@@ -3,6 +3,8 @@
 from __future__ import annotations
 import argparse, re, sys
 import medqc_db as db
+import json
+from medqc_db import get_full_text
 
 SECTION_PATTERNS = [
     ("Поступление", r"\b(Поступление|Госпитализац(ия|ии)|Время поступления)\b", "admit", 90),
@@ -18,14 +20,20 @@ SECTION_PATTERNS = [
 
 
 def main():
+    
     ap = argparse.ArgumentParser(description="medqc-section — секционирование")
     ap.add_argument("--doc-id", required=True)
     args = ap.parse_args()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--doc-id", required=True)
+    args = parser.parse_args()
 
-    full = db.get_full_text(args.doc_id)
-    if full is None:
-        print(f"{{\"error\":{{\"code\":\"NO_TEXT\",\"message\":\"run medqc-extract first\"}}}}")
-        sys.exit(1)
+    full = get_full_text(args.doc_id)
+    if not full:
+        print(json.dumps({"error":{"code":"NO_TEXT","message":"no text extracted"}}))
+        return
+
+    
 
     # Собрать кандидаты: (name, kind, start, priority)
     candidates = []

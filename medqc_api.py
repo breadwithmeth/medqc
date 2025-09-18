@@ -10,30 +10,25 @@ from typing import List, Dict, Any, Optional
 
 from fastapi import FastAPI, UploadFile, File, Form, Header, HTTPException, Depends, Query, Path
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, HTMLResponse, PlainTextResponse
+from fastapi.responses import JSONResponse, HTMLResponse
 
-# ======== ENV / CONFIG ========
 DB_PATH = os.getenv("MEDQC_DB", "/app/medqc.db")
 DEFAULT_RULES_PACKAGE = os.getenv("DEFAULT_RULES_PACKAGE", "kz-standards")
 DEFAULT_RULES_VERSION = os.getenv("DEFAULT_RULES_VERSION", "2025-09-17")
 API_KEY = os.getenv("API_KEY", "devkey")
-
 UPLOAD_DIR = os.getenv("UPLOAD_DIR", "/app/uploads")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
-# ======== APP ========
-app = FastAPI(title="MedQC API", version="1.1.0")
+app = FastAPI(title="MedQC API", version="1.1.1")
 
-# CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # при желании ограничьте фронтом
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# ======== DB HELPERS ========
 def get_conn() -> sqlite3.Connection:
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
@@ -74,10 +69,6 @@ def insert_row_dynamic(conn: sqlite3.Connection, table: str, data: dict):
     conn.execute(f"INSERT OR REPLACE INTO {table} ({fields}) VALUES ({placeholders})", values)
 
 def ensure_docs_table():
-    """
-    Мягкая миграция: создаёт docs при отсутствии и добавляет недостающие часто используемые колонки.
-    Не ломает существующую схему.
-    """
     conn = get_conn()
     conn.executescript("""
     CREATE TABLE IF NOT EXISTS docs(
@@ -86,11 +77,13 @@ def ensure_docs_table():
     );
     """)
     existing = {r[1] for r in conn.execute("PRAGMA table_info(docs)").fetchall()}
+    # добавили facility, чтобы фронт не падал
     for col, ctype in {
         "filename":   "TEXT",
         "path":       "TEXT",
         "dept":       "TEXT",
         "department": "TEXT",
+        "facility":   "TEXT",
         "sha256":     "TEXT",
         "size":       "INTEGER",
         "mime":       "TEXT",
@@ -102,10 +95,6 @@ def ensure_docs_table():
     conn.close()
 
 def ensure_core_schema():
-    """
-    Создаёт минимально необходимые таблицы, если их нет.
-    Безопасно для повторного вызова.
-    """
     conn = get_conn()
     conn.executescript("""
     CREATE TABLE IF NOT EXISTS artifacts(
@@ -114,6 +103,13 @@ def ensure_core_schema():
       kind       TEXT NOT NULL,
       content    TEXT,
       meta_json  TEXT,
+      created_at TEXT NOT NULL
+    );
+
+    -- сырое поле для «склеенного» текста (medqc_section ожидает его)
+    CREATE TABLE IF NOT EXISTS raw(
+      doc_id     TEXT PRIMARY KEY,
+      content    TEXT,
       created_at TEXT NOT NULL
     );
 
@@ -162,7 +158,7 @@ def ensure_core_schema():
     conn.commit()
     conn.close()
 
-# ======== RULES/ORCHESTRATOR ========
+# import после функций
 from medqc_rules import (
     infer_profiles,
     get_doc as rules_get_doc,
@@ -171,8 +167,6 @@ from medqc_rules import (
     load_active_rules,
 )
 from medqc_orchestrator import run_all, run_rules_only
-
-# ======== ENDPOINTS ========
 
 @app.get("/v1/healthz")
 def healthz():
@@ -197,7 +191,11 @@ def get_doc(doc_id: str = Path(...)):
     conn.close()
     if not row:
         raise HTTPException(status_code=404, detail="doc_id not found")
-    return dict(row)
+    d = dict(row)
+    # гарантируем наличие facility для фронта
+    if "facility" not in d or d["facility"] is None:
+        d["facility"] = ""
+    return d
 
 @app.get("/v1/docs/{doc_id}/stats")
 def doc_stats(doc_id: str):
@@ -257,9 +255,6 @@ def api_run_rules(
 
 @app.post("/v1/pipeline/{doc_id}")
 def api_run_pipeline(doc_id: str, _: bool = Depends(require_api_key)):
-    """
-    Ручной запуск полного пайплайна по doc_id.
-    """
     ensure_docs_table()
     ensure_core_schema()
     try:
@@ -270,7 +265,6 @@ def api_run_pipeline(doc_id: str, _: bool = Depends(require_api_key)):
         )
         return {"doc_id": doc_id, "status": "OK"}
     except subprocess.CalledProcessError as cpe:
-        # соберем хвост stderr/stdout, если есть
         return JSONResponse(
             status_code=202,
             content={
@@ -288,11 +282,6 @@ def api_run_pipeline(doc_id: str, _: bool = Depends(require_api_key)):
 
 @app.get("/v1/report/{doc_id}")
 def api_report(doc_id: str, format: str = Query("html"), mask: int = Query(0)):
-    """
-    Возвращает отчёт по документу.
-    Если у тебя уже есть medqc_report.py, можно дергать его.
-    Иначе — соберём простой HTML из БД.
-    """
     if format not in ("html", "json"):
         raise HTTPException(400, "format must be html or json")
 
@@ -320,7 +309,6 @@ def api_report(doc_id: str, format: str = Query("html"), mask: int = Query(0)):
     if format == "json":
         return JSONResponse({"doc": dict(doc), "stats": stats, "violations": violations})
 
-    # простой HTML-репорт
     html = [
         "<html><head><meta charset='utf-8'><title>MedQC Report</title>",
         "<style>body{font-family:system-ui,Arial,sans-serif;padding:16px} .crit{color:#b30000} .maj{color:#b36b00} .min{color:#666} table{border-collapse:collapse;width:100%} td,th{border:1px solid #ddd;padding:8px} th{background:#f8f8f8;text-align:left}</style>",
@@ -346,16 +334,13 @@ async def ingest_file(
     file: UploadFile = File(...),
     dept: Optional[str] = Form(default=None),
     department: Optional[str] = Form(default=None),
+    facility: Optional[str] = Form(default=None),
     _: bool = Depends(require_api_key)
 ):
-    """
-    Принимает файл (PDF/DOCX), сохраняет запись в docs, запускает полный пайплайн и возвращает doc_id.
-    """
     ensure_docs_table()
     ensure_core_schema()
 
     doc_id = f"KZ-{datetime.utcnow().strftime('%Y%m%d')}-{uuid.uuid4().hex[:8].upper()}"
-
     safe_name = file.filename or f"{doc_id}.bin"
     dst_path = os.path.join(UPLOAD_DIR, f"{doc_id}__{safe_name}")
     blob = await file.read()
@@ -374,6 +359,7 @@ async def ingest_file(
             "path": dst_path,
             "dept": dept,
             "department": department,
+            "facility": facility or "",
             "created_at": datetime.utcnow().isoformat() + "Z",
             "sha256": sha256,
             "size": size,
@@ -384,7 +370,6 @@ async def ingest_file(
     finally:
         conn.close()
 
-    # полный пайплайн
     try:
         run_all(
             doc_id=doc_id,
