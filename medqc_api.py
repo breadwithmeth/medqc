@@ -1,147 +1,251 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-
 import os
-import subprocess
-from fastapi import FastAPI, File, UploadFile, Form, HTTPException
+import io
+import uuid
+import json
+import hashlib
+import sqlite3
+from datetime import datetime
+from typing import List, Dict, Any, Optional
+
+from fastapi import FastAPI, UploadFile, File, Form, Header, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, PlainTextResponse, HTMLResponse
-from typing import Optional
-import uuid, datetime as dt
-# ENV
+from fastapi.responses import JSONResponse
+
+# ======== ENV / CONFIG ========
+DB_PATH = os.getenv("MEDQC_DB", "/app/medqc.db")
 DEFAULT_RULES_PACKAGE = os.getenv("DEFAULT_RULES_PACKAGE", "kz-standards")
 DEFAULT_RULES_VERSION = os.getenv("DEFAULT_RULES_VERSION", "2025-09-17")
-MEDQC_DB = os.getenv("MEDQC_DB", "/app/medqc.db")
-UPLOADS_DIR = os.getenv("MEDQC_UPLOADS", "/app/uploads")
+API_KEY = os.getenv("API_KEY", "devkey")
 
-app = FastAPI(title="medqc api", version="1.0")
+UPLOAD_DIR = os.getenv("UPLOAD_DIR", "/app/uploads")
+os.makedirs(UPLOAD_DIR, exist_ok=True)
 
-# CORS (при необходимости поправь происхождения)
+# ======== APP ========
+app = FastAPI(title="MedQC API", version="1.0.0")
+
+# CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["*"],  # при желании ограничьте фронтом: ["http://localhost:8080", "http://localhost:3000"]
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-def run_cmd(cmd: list[str]) -> tuple[int, str, str]:
-    p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-    out, err = p.communicate()
-    return p.returncode, out, err
+# ======== DB HELPERS ========
+def get_conn() -> sqlite3.Connection:
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+def require_api_key(x_api_key: Optional[str] = Header(default=None)):
+    if not x_api_key or x_api_key != API_KEY:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    return True
+
+def get_table_info(conn: sqlite3.Connection, table: str):
+    info = {}
+    for cid, name, ctype, notnull, dflt, pk in conn.execute(f"PRAGMA table_info({table})"):
+        info[name] = {"type": (ctype or "").upper(), "notnull": bool(notnull), "default": dflt, "pk": bool(pk)}
+    return info
+
+def safe_defaults(coltype: str):
+    t = (coltype or "").upper()
+    if "INT" in t:
+        return 0
+    if "DATE" in t or "TIME" in t:
+        return datetime.utcnow().isoformat() + "Z"
+    return ""
+
+def insert_row_dynamic(conn: sqlite3.Connection, table: str, data: dict):
+    cols_info = get_table_info(conn, table)
+    row = {}
+    for name, meta in cols_info.items():
+        if name in data and data[name] is not None:
+            row[name] = data[name]
+        elif meta["notnull"] and not meta["pk"]:
+            row[name] = safe_defaults(meta["type"])
+    if not row:
+        raise RuntimeError(f"Table {table} has no columns to insert")
+    fields = ",".join(row.keys())
+    placeholders = ",".join(["?"] * len(row))
+    values = list(row.values())
+    conn.execute(f"INSERT OR REPLACE INTO {table} ({fields}) VALUES ({placeholders})", values)
+
+def ensure_docs_table():
+    """
+    Мягкая миграция: создаёт docs при отсутствии и добавляет недостающие часто используемые колонки.
+    Не ломает существующую схему.
+    """
+    conn = get_conn()
+    conn.executescript("""
+    CREATE TABLE IF NOT EXISTS docs(
+      doc_id     TEXT PRIMARY KEY,
+      created_at TEXT NOT NULL
+    );
+    """)
+    existing = {r[1] for r in conn.execute("PRAGMA table_info(docs)").fetchall()}
+    for col, ctype in {
+        "filename":   "TEXT",
+        "path":       "TEXT",
+        "dept":       "TEXT",
+        "department": "TEXT",
+        "sha256":     "TEXT",
+        "size":       "INTEGER",
+        "mime":       "TEXT",
+        "status":     "TEXT"
+    }.items():
+        if col not in existing:
+            conn.execute(f"ALTER TABLE docs ADD COLUMN {col} {ctype}")
+    conn.commit()
+    conn.close()
+
+# ======== RULES/ORCHESTRATOR IMPORTS ========
+from medqc_rules import (
+    infer_profiles,
+    get_doc as rules_get_doc,
+    get_entities,
+    get_events,
+    load_active_rules,
+)
+from medqc_orchestrator import run_all, run_rules_only
+
+# ======== ENDPOINTS ========
 
 @app.get("/v1/healthz")
 def healthz():
-    return {"status": "ok"}
+    return {"ok": True, "version": app.version}
 
-# --- upload/ingest (если у тебя уже был — можешь оставить свой, этот примерный) ---
+@app.get("/v1/healthz/db")
+def healthz_db():
+    exists = os.path.exists(DB_PATH)
+    size = os.path.getsize(DB_PATH) if exists else 0
+    return {"db_path": DB_PATH, "exists": exists, "size": size}
 
-def make_doc_id(prefix: str = "KZ") -> str:
-    # Пример: KZ-20250918-94A30A4B
-    ts = dt.datetime.utcnow().strftime("%Y%m%d")
-    suf = uuid.uuid4().hex[:8].upper()
-    return f"{prefix}-{ts}-{suf}"
+@app.post("/v1/admin/migrate")
+def admin_migrate(_: bool = Depends(require_api_key)):
+    ensure_docs_table()
+    return {"status": "migrated", "db": DB_PATH}
+
+@app.get("/v1/docs/{doc_id}")
+def get_doc(doc_id: str):
+    conn = get_conn()
+    row = conn.execute("SELECT * FROM docs WHERE doc_id=?", (doc_id,)).fetchone()
+    conn.close()
+    if not row:
+        raise HTTPException(status_code=404, detail="doc_id not found")
+    return dict(row)
+
+@app.get("/v1/docs/{doc_id}/stats")
+def doc_stats(doc_id: str):
+    conn = get_conn()
+    s = conn.execute("SELECT COUNT(*) FROM sections WHERE doc_id=?", (doc_id,)).fetchone()[0]
+    e = conn.execute("SELECT COUNT(*) FROM entities WHERE doc_id=?", (doc_id,)).fetchone()[0]
+    v = conn.execute("SELECT COUNT(*) FROM events   WHERE doc_id=?", (doc_id,)).fetchone()[0]
+    conn.close()
+    return {"doc_id": doc_id, "sections": s, "entities": e, "events": v}
+
+@app.get("/v1/violations/{doc_id}")
+def get_violations(doc_id: str) -> List[Dict[str, Any]]:
+    conn = get_conn()
+    rows = conn.execute("""
+        SELECT rule_id, severity, message, created_at
+        FROM violations
+        WHERE doc_id=?
+        ORDER BY created_at DESC
+    """, (doc_id,)).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+@app.get("/v1/debug/rules")
+def debug_rules(doc_id: str):
+    conn = get_conn()
+    doc = rules_get_doc(conn, doc_id)
+    if not doc:
+        conn.close()
+        raise HTTPException(status_code=404, detail="doc_id not found")
+    ents = get_entities(conn, doc_id)
+    evs  = get_events(conn, doc_id)
+    profiles = infer_profiles(doc, ents, evs)
+    rules = load_active_rules(conn, profiles, DEFAULT_RULES_PACKAGE, DEFAULT_RULES_VERSION)
+    conn.close()
+    return {
+        "doc_id": doc_id,
+        "profiles": profiles,
+        "rules_count": len(rules),
+        "rule_ids": [r.get("rule_id") for r in rules]
+    }
+
+@app.post("/v1/run-rules")
+def api_run_rules(
+    doc_id: str = Form(...),
+    _: bool = Depends(require_api_key)
+):
+    try:
+        result = run_rules_only(
+            doc_id,
+            package=DEFAULT_RULES_PACKAGE,
+            version=DEFAULT_RULES_VERSION
+        )
+        return JSONResponse(content=result)
+    except Exception as ex:
+        raise HTTPException(status_code=500, detail=f"run-rules failed: {ex}")
 
 @app.post("/v1/ingest")
-async def ingest(
+async def ingest_file(
     file: UploadFile = File(...),
-    # form (optional)
-    doc_id: Optional[str] = Form(None),
-    facility: str = Form(""),
-    dept: str = Form(""),
-    author: str = Form(""),
-    # также позволим query-параметр
-    doc_id_q: Optional[str] = None,
+    dept: Optional[str] = Form(default=None),
+    department: Optional[str] = Form(default=None),
+    _: bool = Depends(require_api_key)
 ):
-    # выберем doc_id: приоритет form > query > автогенерация
-    the_doc_id = (doc_id or doc_id_q or make_doc_id())
+    """
+    Принимает файл (PDF/DOCX), сохраняет запись в docs, запускает полный пайплайн и возвращает doc_id.
+    """
+    ensure_docs_table()
 
-    os.makedirs(UPLOADS_DIR, exist_ok=True)
-    tmp_path = os.path.join(UPLOADS_DIR, f"{the_doc_id}__{file.filename}")
-    with open(tmp_path, "wb") as f:
-        f.write(await file.read())
+    doc_id = f"KZ-{datetime.utcnow().strftime('%Y%m%d')}-{uuid.uuid4().hex[:8].upper()}"
 
-    code, out, err = run_cmd([
-        "python", "medqc_ingest.py",
-        "--file", tmp_path,
-        "--doc-id", the_doc_id,
-        "--facility", facility,
-        "--dept", dept,
-        "--author", author,
-    ])
-    if code != 0:
-        return JSONResponse(status_code=500, content={
-            "doc_id": the_doc_id,
-            "status": "INGEST_ERROR",
-            "stderr_tail": "\n".join((err or "").splitlines()[-30:])
-        })
+    safe_name = file.filename or f"{doc_id}.bin"
+    dst_path = os.path.join(UPLOAD_DIR, f"{doc_id}__{safe_name}")
+    blob = await file.read()
+    with open(dst_path, "wb") as f:
+        f.write(blob)
+
+    sha256 = hashlib.sha256(blob).hexdigest()
+    size = len(blob)
+    mime = file.content_type or ""
+
+    conn = get_conn()
     try:
-        return JSONResponse(status_code=200, content=eval(out) if out.strip().startswith("{") else {
-            "doc_id": the_doc_id, "status": "INGESTED"
+        insert_row_dynamic(conn, "docs", {
+            "doc_id": doc_id,
+            "filename": safe_name,
+            "path": dst_path,
+            "dept": dept,
+            "department": department,
+            "created_at": datetime.utcnow().isoformat() + "Z",
+            "sha256": sha256,
+            "size": size,
+            "mime": mime,
+            "status": "new"
         })
-    except Exception:
-        return JSONResponse(status_code=200, content={"doc_id": the_doc_id, "status": "INGESTED"})
-# --- полный пайплайн: extract -> section -> entities -> timeline -> rules ---
-@app.post("/v1/pipeline/{doc_id}")
-def run_pipeline(doc_id: str):
-    steps = [
-        ["python", "medqc_extract.py",  "--doc-id", doc_id],
-        ["python", "medqc_section.py",  "--doc-id", doc_id],
-        ["python", "medqc_entities.py", "--doc-id", doc_id],
-        ["python", "medqc_timeline.py", "--doc-id", doc_id],
-        ["python", "medqc_rules.py",    "--doc-id", doc_id, "--package-name", DEFAULT_RULES_PACKAGE, "--package-version", DEFAULT_RULES_VERSION],
-    ]
-    results = []
-    for cmd in steps:
-        code, out, err = run_cmd(cmd)
-        results.append({
-            "cmd": " ".join(cmd),
-            "code": code,
-            "out": (out or "").strip(),
-            "err_tail": "\n".join((err or "").splitlines()[-20:])
-        })
-        if code != 0:
-            return JSONResponse(
-                status_code=500,
-                content={
-                    "doc_id": doc_id,
-                    "status": "PIPELINE_ERROR",
-                    "failed_cmd": " ".join(cmd),
-                    "stderr_tail": results[-1]["err_tail"],
-                    "steps": results
-                }
-            )
-    return JSONResponse(status_code=200, content={"doc_id": doc_id, "status": "PIPELINE_OK", "steps": results})
+        conn.commit()
+    finally:
+        conn.close()
 
-# --- отчёт (json/html) ---
-@app.get("/v1/report/{doc_id}")
-def get_report(doc_id: str, format: str = "json", mask: int = 0):
-    fmt = format.lower()
-    cmd = ["python", "medqc_report.py", "--doc-id", doc_id,
-           "--package-name", DEFAULT_RULES_PACKAGE, "--package-version", DEFAULT_RULES_VERSION,
-           "--format", ("html" if fmt == "html" else "json")]
-    if mask:
-        cmd += ["--mask"]
-    code, out, err = run_cmd(cmd)
-    if code != 0:
-        raise HTTPException(status_code=500, detail={
-            "doc_id": doc_id, "stage": "report",
-            "stderr_tail": "\n".join((err or "").splitlines()[-30:])
-        })
-    if fmt == "html":
-        return HTMLResponse(content=out, status_code=200)
-    return PlainTextResponse(out, status_code=200, media_type="application/json")
+    try:
+        run_all(
+            doc_id=doc_id,
+            package=DEFAULT_RULES_PACKAGE,
+            version=DEFAULT_RULES_VERSION
+        )
+    except Exception as ex:
+        return JSONResponse(
+            status_code=202,
+            content={"doc_id": doc_id, "status": "PIPELINE_ERROR",
+                     "failed_cmd": str(getattr(ex, 'cmd', 'unknown')),
+                     "stderr_tail": getattr(ex, 'stderr', None),
+                     "steps": getattr(ex, 'steps', None)}
+        )
 
-# --- быстрый список нарушений (удобно для дебага) ---
-@app.get("/v1/violations/{doc_id}")
-def list_violations(doc_id: str):
-    code, out, err = run_cmd([
-        "python", "medqc_report.py", "--doc-id", doc_id,
-        "--package-name", DEFAULT_RULES_PACKAGE, "--package-version", DEFAULT_RULES_VERSION,
-        "--format", "json"
-    ])
-    if code != 0:
-        raise HTTPException(status_code=500, detail={
-            "doc_id": doc_id, "stage": "report",
-            "stderr_tail": "\n".join((err or "").splitlines()[-30:])
-        })
-    return PlainTextResponse(out, status_code=200, media_type="application/json")
+    return {"doc_id": doc_id, "status": "OK"}
