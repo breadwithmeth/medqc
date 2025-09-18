@@ -7,9 +7,7 @@ import argparse
 import sqlite3
 from typing import List
 
-# вверху файла
-from medqc_db import get_conn, get_doc_file_path, ensure_extract_tables
-import glob, os
+from medqc_db import get_conn, ensure_extract_tables, get_doc_file_path
 
 # опциональные парсеры
 try:
@@ -38,24 +36,20 @@ def extract_docx_paragraphs(path: str) -> List[str]:
     if not docx:
         raise RuntimeError("python-docx не установлен в окружении контейнера.")
     d = docx.Document(path)
-    # соберём как pseudo-страницы по крупным блокам (для согласованности)
     text = []
     for p in d.paragraphs:
         text.append(p.text or "")
     content = "\n".join(text).strip()
-    # разбивать по страницам DOCX сложно; положим всю «страницу» как idx=0
     return [content] if content else []
+
 
 def save_pages(conn: sqlite3.Connection, doc_id: str, pages: List[str]):
     ensure_extract_tables(conn)
-    # очищаем прежние страницы документа
     conn.execute("DELETE FROM pages WHERE doc_id=?", (doc_id,))
-    # массовая вставка в транзакции
     conn.executemany(
         "INSERT INTO pages(doc_id, idx, text) VALUES(?,?,?)",
         [(doc_id, i, (txt or "")) for i, txt in enumerate(pages)]
     )
-    # сырой склеенный текст
     full = "\n\n".join(pages)
     conn.execute("INSERT OR REPLACE INTO raw(doc_id, content) VALUES(?,?)", (doc_id, full))
 
@@ -64,23 +58,14 @@ def run_extract(doc_id: str) -> dict:
     with get_conn() as conn:
         src = get_doc_file_path(conn, doc_id)
         if not src or not os.path.exists(src):
-            # соберём кандидатов для диагностики
-            candidates = []
-            # legacy пути
-            candidates += glob.glob(os.path.join("/app/uploads", f"{doc_id}__*"))
-            candidates += glob.glob(os.path.join("/app/uploads", f"{doc_id}*"))
-            folder = os.path.join("/app/uploads", doc_id)
-            if os.path.isdir(folder):
-                candidates += glob.glob(os.path.join(folder, "*"))
             raise RuntimeError(
-                "Source file not found for doc_id={}. "
-                "Checked docs.src_path/path/filename, /app/uploads/{}/ and legacy patterns. "
-                "Candidates seen: {}".format(doc_id, doc_id, candidates[:5])
+                f"Source file not found for doc_id={doc_id}. "
+                f"Проверь docs.src_path/path/filename и /app/uploads/{doc_id}/"
             )
         ext = os.path.splitext(src)[1].lower()
-        if ext in (".pdf",):
+        if ext == ".pdf":
             pages = extract_pdf_pages(src)
-        elif ext in (".docx",):
+        elif ext == ".docx":
             pages = extract_docx_paragraphs(src)
         else:
             raise RuntimeError(f"Unsupported file type: {ext}")

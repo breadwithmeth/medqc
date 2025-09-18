@@ -5,66 +5,40 @@ import os
 import glob
 import json
 import sqlite3
-from typing import Any, Dict, List, Optional, Tuple
-import glob
-from typing import Iterable, Mapping
+from typing import Any, Dict, List, Optional, Iterable, Mapping
 
+# Конфигурация путей
 DB_PATH = os.getenv("MEDQC_DB", "./medqc.db")
 UPLOADS_DIR = os.getenv("MEDQC_UPLOADS", "/app/uploads")
 
-
-
-
-def _val(d: Mapping, *keys, default=None):
-    for k in keys:
-        if k in d and d[k] is not None:
-            return d[k]
-    return default
-
-def replace_sections(doc_id: str, rows: Iterable[Mapping]):
-    """
-    Полностью заменяет секции документа.
-    rows — итерируемая коллекция dict-подобных объектов.
-    Поддерживает ключи: idx, start, end, title, name, text  (избыточные — игнорируются).
-    """
-    with get_conn() as conn:
-        _ensure_sections_schema(conn)
-        conn.execute("DELETE FROM sections WHERE doc_id=?", (doc_id,))
-        payload = []
-        for r in rows:
-            payload.append((
-                doc_id,
-                _val(r, "idx", "index", default=None),
-                _val(r, "start", default=None),
-                _val(r, "end", default=None),
-                _val(r, "title", default=None),
-                _val(r, "name", default=None),
-                _val(r, "text", "content", default=""),
-                _val(r, "kind", default=None)
-            ))
-        if payload:
-            conn.executemany("""
-                INSERT INTO sections(doc_id, idx, start, "end", title, name, text, kind, created_at)
-                VALUES(?,?,?,?,?,?,?,?, datetime('now'))
-            """, payload)
-        conn.commit()
-
-
-
-
-# ---------- low-level ----------
+# ----------------------------------------------------------------------
+# Базовые утилиты
+# ----------------------------------------------------------------------
 
 def get_conn(path: Optional[str] = None) -> sqlite3.Connection:
     return sqlite3.connect(path or DB_PATH)
 
+def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
+    try:
+        rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+        return {r[1] for r in rows}
+    except Exception:
+        return set()
+
+def _ensure_column_simple(conn: sqlite3.Connection, table: str, col: str, decl: str):
+    """Добавляет колонку без неконстантных DEFAULT (совместимо с SQLite ALTER TABLE)."""
+    cols = _table_columns(conn, table)
+    if col not in cols:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
 
 def dicts(cur, rows):
     cols = [c[0] for c in cur.description]
     for r in rows:
         yield dict(zip(cols, r))
 
-
-# ---------- docs / file path helpers ----------
+# ----------------------------------------------------------------------
+# Поиск исходного файла документа (docs.* + /app/uploads)
+# ----------------------------------------------------------------------
 
 def get_doc(conn: sqlite3.Connection, doc_id: str) -> Dict[str, Any]:
     cur = conn.execute("SELECT * FROM docs WHERE doc_id=?", (doc_id,))
@@ -134,135 +108,16 @@ def get_doc_file_path(conn: sqlite3.Connection, doc_id: str) -> Optional[str]:
 
     return None
 
-# --- универсальный get_sections: поддерживает (doc_id) и (conn, doc_id) ---
-
-def get_sections(*args, **kwargs) -> List[Dict[str, Any]]:
-    """
-    Универсальный доступ к секциям документа.
-    Поддерживает вызовы:
-      get_sections(doc_id)
-      get_sections(conn, doc_id)
-    Возвращает список dict, гарантируя алиас 'section_id' (равен 'id') и наличие ключей 'kind','idx','start','end','title','name','text'.
-    """
-    # разбор аргументов
-    if len(args) == 1:
-        conn = get_conn()
-        doc_id = args[0]
-        should_close = True
-    elif len(args) == 2:
-        conn, doc_id = args
-        should_close = False
-    else:
-        raise TypeError("get_sections expects (doc_id) or (conn, doc_id)")
-
-    try:
-        # определим подходящее поле сортировки
-        cols_info = conn.execute("PRAGMA table_info(sections)").fetchall()
-        colnames_existing = {r[1] for r in cols_info}
-        order_by = "idx" if "idx" in colnames_existing else ("start" if "start" in colnames_existing else "id")
-
-        cur = conn.execute(f"SELECT * FROM sections WHERE doc_id=? ORDER BY {order_by}", (doc_id,))
-        rows = []
-        if cur.description:
-            colnames = [c[0] for c in cur.description]
-            for rec in cur.fetchall():
-                row = dict(zip(colnames, rec))
-                # алиасы/дефолты для совместимости
-                row.setdefault("section_id", row.get("id"))
-                row.setdefault("kind", None)
-                row.setdefault("idx", None)
-                row.setdefault("start", None)
-                row.setdefault("end", None)
-                row.setdefault("title", row.get("name"))
-                row.setdefault("name", row.get("title"))
-                row.setdefault("text", row.get("content") or row.get("text") or "")
-                rows.append(row)
-        return rows
-    finally:
-        if should_close:
-            conn.close()
-
-
-
-def get_entities(conn: sqlite3.Connection, doc_id: str) -> List[Dict[str, Any]]:
-    cur = conn.execute("SELECT * FROM entities WHERE doc_id=?", (doc_id,))
-    return list(dicts(cur, cur.fetchall()))
-
-
-def get_events(conn: sqlite3.Connection, doc_id: str) -> List[Dict[str, Any]]:
-    # определим, как у нас называется колонка времени
-    cols = [r[1] for r in conn.execute("PRAGMA table_info(events)").fetchall()]
-    ts_col = "ts" if "ts" in cols else ("when" if "when" in cols else None)
-    order = f" ORDER BY {ts_col}" if ts_col else ""
-    cur = conn.execute(f"SELECT * FROM events WHERE doc_id=?{order}", (doc_id,))
-    return list(dicts(cur, cur.fetchall()))
-
-
-
-def get_full_text(doc_id: str) -> str:
-    """
-    Возвращает полный текст документа:
-      1) из raw.content, если есть;
-      2) иначе склеивает pages.text по idx;
-      3) иначе пустая строка.
-    """
-    with get_conn() as conn:
-        # raw
-        cur = conn.execute("SELECT content FROM raw WHERE doc_id=?", (doc_id,))
-        row = cur.fetchone()
-        if row and row[0]:
-            return row[0]
-        # pages
-        try:
-            cur = conn.execute("SELECT text FROM pages WHERE doc_id=? ORDER BY idx", (doc_id,))
-            texts = [r[0] or "" for r in cur.fetchall()]
-            if texts:
-                return "\n\n".join(texts)
-        except Exception:
-            pass
-    return ""
-
-
-
-# ---------- simple init helpers (не агрессивно) ----------
-
-SCHEMA_PAGES = """
-CREATE TABLE IF NOT EXISTS pages(
-  id       INTEGER PRIMARY KEY,
-  doc_id   TEXT NOT NULL,
-  idx      INTEGER NOT NULL,
-  text     TEXT,
-  created_at TEXT NOT NULL DEFAULT (datetime('now'))
-);
-CREATE INDEX IF NOT EXISTS idx_pages_doc ON pages(doc_id, idx);
-"""
-
-SCHEMA_RAW = """
-CREATE TABLE IF NOT EXISTS raw(
-  doc_id    TEXT PRIMARY KEY,
-  content   TEXT,
-  created_at TEXT NOT NULL DEFAULT (datetime('now'))
-);
-"""
-def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
-    try:
-        rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
-        return {r[1] for r in rows}
-    except Exception:
-        return set()
-
-def _ensure_column_simple(conn: sqlite3.Connection, table: str, col: str, decl: str):
-    """Простое добавление колонки без неконстантных DEFAULT."""
-    cols = _table_columns(conn, table)
-    if col not in cols:
-        conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
+# ----------------------------------------------------------------------
+# Тексты: pages/raw + мягкие миграции
+# ----------------------------------------------------------------------
 
 def ensure_extract_tables(conn: sqlite3.Connection):
     """
     Создаём/мигрируем pages/raw. Для уже существующих таблиц мягко добавляем недостающие столбцы.
     Важно: при ALTER TABLE не используем неконстантные DEFAULT (sqlite не поддерживает).
     """
-    # pages: создать если нет (с дефолтами допустимыми при CREATE)
+    # pages: создать если нет
     conn.execute("""
         CREATE TABLE IF NOT EXISTS pages(
             id         INTEGER PRIMARY KEY,
@@ -272,17 +127,16 @@ def ensure_extract_tables(conn: sqlite3.Connection):
             created_at TEXT NOT NULL DEFAULT (datetime('now'))
         );
     """)
-
-    # мягкая миграция существующей pages
+    # мягкая миграция pages
     _ensure_column_simple(conn, "pages", "idx",  "INTEGER")
     _ensure_column_simple(conn, "pages", "text", "TEXT")
-    # created_at добавляем как TEXT без DEFAULT, затем проставляем значения там, где NULL
+    # created_at добавляем без DEFAULT, затем заполняем
     cols = _table_columns(conn, "pages")
     if "created_at" not in cols:
-        conn.execute(f"ALTER TABLE pages ADD COLUMN created_at TEXT")
+        conn.execute("ALTER TABLE pages ADD COLUMN created_at TEXT")
         conn.execute("UPDATE pages SET created_at = datetime('now') WHERE created_at IS NULL")
 
-    # индекс (идемпотентно)
+    # индекс
     try:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_pages_doc ON pages(doc_id, idx)")
     except Exception:
@@ -296,8 +150,28 @@ def ensure_extract_tables(conn: sqlite3.Connection):
             created_at TEXT NOT NULL DEFAULT (datetime('now'))
         );
     """)
-def _ensure_table(conn: sqlite3.Connection, create_sql: str):
-    conn.execute(create_sql)
+
+def get_full_text(doc_id: str) -> str:
+    """
+    Возвращает полный текст документа: raw.content или склейка pages.text.
+    """
+    with get_conn() as conn:
+        cur = conn.execute("SELECT content FROM raw WHERE doc_id=?", (doc_id,))
+        row = cur.fetchone()
+        if row and row[0]:
+            return row[0]
+        try:
+            cur = conn.execute("SELECT text FROM pages WHERE doc_id=? ORDER BY idx", (doc_id,))
+            parts = [r[0] or "" for r in cur.fetchall()]
+            if parts:
+                return "\n\n".join(parts)
+        except Exception:
+            pass
+    return ""
+
+# ----------------------------------------------------------------------
+# sections: schema + replace/get
+# ----------------------------------------------------------------------
 
 def _ensure_sections_schema(conn: sqlite3.Connection):
     # создать если нет
@@ -311,27 +185,105 @@ def _ensure_sections_schema(conn: sqlite3.Connection):
             title      TEXT,
             name       TEXT,
             text       TEXT,
-            kind       TEXT, 
+            kind       TEXT,
             created_at TEXT
         );
     """)
-    # мягко добавить недостающие колонки
-    _ensure_column_simple(conn, "sections", "idx",  "INTEGER")
-    _ensure_column_simple(conn, "sections", "start","INTEGER")
-    _ensure_column_simple(conn, "sections", "end",  "INTEGER")
-    _ensure_column_simple(conn, "sections", "title","TEXT")
-    _ensure_column_simple(conn, "sections", "name", "TEXT")
-    _ensure_column_simple(conn, "sections", "text", "TEXT")
-    _ensure_column_simple(conn, "sections", "kind", "TEXT")
+    # мягкая миграция
+    _ensure_column_simple(conn, "sections", "idx",   "INTEGER")
+    _ensure_column_simple(conn, "sections", "start", "INTEGER")
+    _ensure_column_simple(conn, "sections", "end",   "INTEGER")
+    _ensure_column_simple(conn, "sections", "title", "TEXT")
+    _ensure_column_simple(conn, "sections", "name",  "TEXT")
+    _ensure_column_simple(conn, "sections", "text",  "TEXT")
+    _ensure_column_simple(conn, "sections", "kind",  "TEXT")
     if "created_at" not in _table_columns(conn, "sections"):
         conn.execute("ALTER TABLE sections ADD COLUMN created_at TEXT")
         conn.execute("UPDATE sections SET created_at = datetime('now') WHERE created_at IS NULL")
-    # индексы
     try:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_sections_doc ON sections(doc_id, idx)")
     except Exception:
         pass
 
+def _val(d: Mapping, *keys, default=None):
+    for k in keys:
+        if k in d and d[k] is not None:
+            return d[k]
+    return default
+
+def replace_sections(doc_id: str, rows: Iterable[Mapping]):
+    """
+    Полностью заменяет секции документа.
+    rows: dict-подобные объекты с ключами idx/start/end/title/name/text/kind (избыточные — игнорируются).
+    """
+    with get_conn() as conn:
+        _ensure_sections_schema(conn)
+        conn.execute("DELETE FROM sections WHERE doc_id=?", (doc_id,))
+        payload = []
+        for r in rows:
+            payload.append((
+                doc_id,
+                _val(r, "idx", "index", default=None),
+                _val(r, "start", default=None),
+                _val(r, "end", default=None),
+                _val(r, "title", default=None),
+                _val(r, "name", default=None),
+                _val(r, "text", "content", default=""),
+                _val(r, "kind", default=None),
+            ))
+        if payload:
+            conn.executemany("""
+                INSERT INTO sections(doc_id, idx, start, "end", title, name, text, kind, created_at)
+                VALUES(?,?,?,?,?,?,?, ?, datetime('now'))
+            """, payload)
+        conn.commit()
+
+def get_sections(*args, **kwargs) -> List[Dict[str, Any]]:
+    """
+    Универсальный доступ к секциям документа.
+    Поддерживает вызовы:
+      get_sections(doc_id)
+      get_sections(conn, doc_id)
+    Гарантирует алиас 'section_id' и наличие ключей.
+    """
+    if len(args) == 1:
+        conn = get_conn()
+        doc_id = args[0]
+        should_close = True
+    elif len(args) == 2:
+        conn, doc_id = args
+        should_close = False
+    else:
+        raise TypeError("get_sections expects (doc_id) or (conn, doc_id)")
+
+    try:
+        cols_info = conn.execute("PRAGMA table_info(sections)").fetchall()
+        colnames_existing = {r[1] for r in cols_info}
+        order_by = "idx" if "idx" in colnames_existing else ("start" if "start" in colnames_existing else "id")
+
+        cur = conn.execute(f"SELECT * FROM sections WHERE doc_id=? ORDER BY {order_by}", (doc_id,))
+        rows = []
+        if cur.description:
+            colnames = [c[0] for c in cur.description]
+            for rec in cur.fetchall():
+                row = dict(zip(colnames, rec))
+                row.setdefault("section_id", row.get("id"))
+                row.setdefault("kind", None)
+                row.setdefault("idx", None)
+                row.setdefault("start", None)
+                row.setdefault("end", None)
+                row.setdefault("title", row.get("title") or row.get("name"))
+                row.setdefault("name", row.get("name") or row.get("title"))
+                row.setdefault("text", row.get("content") or row.get("text") or "")
+                rows.append(row)
+        return rows
+    finally:
+        if should_close:
+            conn.close()
+
+# ----------------------------------------------------------------------
+# entities: schema + replace/get
+# ----------------------------------------------------------------------
 
 def _ensure_entities_schema(conn: sqlite3.Connection):
     conn.execute("""
@@ -342,6 +294,7 @@ def _ensure_entities_schema(conn: sqlite3.Connection):
             value_json TEXT,
             span_start INTEGER,
             span_end   INTEGER,
+            section_id INTEGER,
             created_at TEXT
         );
     """)
@@ -349,6 +302,7 @@ def _ensure_entities_schema(conn: sqlite3.Connection):
     _ensure_column_simple(conn, "entities", "value_json", "TEXT")
     _ensure_column_simple(conn, "entities", "span_start", "INTEGER")
     _ensure_column_simple(conn, "entities", "span_end", "INTEGER")
+    _ensure_column_simple(conn, "entities", "section_id", "INTEGER")
     if "created_at" not in _table_columns(conn, "entities"):
         conn.execute("ALTER TABLE entities ADD COLUMN created_at TEXT")
         conn.execute("UPDATE entities SET created_at = datetime('now') WHERE created_at IS NULL")
@@ -360,7 +314,7 @@ def _ensure_entities_schema(conn: sqlite3.Connection):
 def replace_entities(doc_id: str, rows: Iterable[Mapping]):
     """
     Полностью заменяет сущности документа.
-    rows — dict-подобные объекты с ключами: etype, value_json|value, span_start|start, span_end|end.
+    rows: dict-подобные объекты с ключами: etype, value_json|value, span_start|start, span_end|end, section_id.
     """
     with get_conn() as conn:
         _ensure_entities_schema(conn)
@@ -369,7 +323,6 @@ def replace_entities(doc_id: str, rows: Iterable[Mapping]):
         for r in rows:
             val = _val(r, "value_json", default=None)
             if val is None:
-                # если пришёл python-объект в "value" — сериализуем
                 vobj = _val(r, "value", default={})
                 try:
                     val = json.dumps(vobj, ensure_ascii=False)
@@ -381,12 +334,48 @@ def replace_entities(doc_id: str, rows: Iterable[Mapping]):
                 val,
                 _val(r, "span_start", "start", default=None),
                 _val(r, "span_end", "end", default=None),
+                _val(r, "section_id", default=None),
             ))
         if payload:
             conn.executemany("""
-                INSERT INTO entities(doc_id, etype, value_json, span_start, span_end, created_at)
-                VALUES(?,?,?,?,?, datetime('now'))
+                INSERT INTO entities(doc_id, etype, value_json, span_start, span_end, section_id, created_at)
+                VALUES(?,?,?,?,?, ?, datetime('now'))
             """, payload)
         conn.commit()
 
+def get_entities(conn: sqlite3.Connection, doc_id: str) -> List[Dict[str, Any]]:
+    cur = conn.execute("SELECT * FROM entities WHERE doc_id=?", (doc_id,))
+    return list(dicts(cur, cur.fetchall()))
 
+# ----------------------------------------------------------------------
+# events: (используется timeline/rules)
+# ----------------------------------------------------------------------
+
+def init_events_schema(conn: sqlite3.Connection):
+    conn.execute("""
+    CREATE TABLE IF NOT EXISTS events(
+      id INTEGER PRIMARY KEY,
+      doc_id TEXT NOT NULL,
+      kind TEXT NOT NULL,
+      ts TEXT,
+      value_json TEXT
+    );
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_events_doc ON events(doc_id, ts)")
+
+def clear_events(conn: sqlite3.Connection, doc_id: str):
+    conn.execute("DELETE FROM events WHERE doc_id=?", (doc_id,))
+
+def add_event(conn: sqlite3.Connection, doc_id: str, kind: str, ts: Optional[str], value: Optional[Dict[str, Any]] = None):
+    init_events_schema(conn)
+    conn.execute(
+        "INSERT INTO events(doc_id, kind, ts, value_json) VALUES(?,?,?,?)",
+        (doc_id, kind, ts, json.dumps(value or {}, ensure_ascii=False))
+    )
+
+def get_events(conn: sqlite3.Connection, doc_id: str) -> List[Dict[str, Any]]:
+    cols = [r[1] for r in conn.execute("PRAGMA table_info(events)").fetchall()]
+    ts_col = "ts" if "ts" in cols else ("when" if "when" in cols else None)
+    order = f" ORDER BY {ts_col}" if ts_col else ""
+    cur = conn.execute(f"SELECT * FROM events WHERE doc_id=?{order}", (doc_id,))
+    return list(dicts(cur, cur.fetchall()))
