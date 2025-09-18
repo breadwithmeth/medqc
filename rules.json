@@ -1,7 +1,7 @@
 {
   "package": "kz-standards",
-  "version": "2025-09-17",
-  "title": "Правила контроля медицинских документов (стандарты МЗ РК)",
+  "version": "2025-09-18",
+  "title": "Правила контроля медицинских документов (МЗ РК) — максимум деталей",
   "description": "Полный набор проверок соответствия медицинской документации стандартам Министерства здравоохранения Республики Казахстан по профилям стационарной, стационарозамещающей, неотложной и профильной помощи.",
   "rules": [
     {
@@ -12,7 +12,11 @@
       "enabled": true,
       "params": {},
       "sources": [
-        { "order_no": "ҚР-ДСМ-27", "date": "2022-03-24", "title": "Стандарт стационарной помощи" }
+        {
+          "order_no": "ҚР-ДСМ-27",
+          "date": "2022-03-24",
+          "title": "Стандарт стационарной помощи"
+        }
       ],
       "effective_from": "2022-03-24",
       "effective_to": "",
@@ -24,9 +28,15 @@
       "profile": "STA",
       "severity": "critical",
       "enabled": true,
-      "params": { "ПЕРВИЧНЫЙ_ОСМОТР_ЧАСОВ": 6 },
+      "params": {
+        "ПЕРВИЧНЫЙ_ОСМОТР_ЧАСОВ": 6
+      },
       "sources": [
-        { "order_no": "ҚР-ДСМ-27", "date": "2022-03-24", "clause": "первичный осмотр" }
+        {
+          "order_no": "ҚР-ДСМ-27",
+          "date": "2022-03-24",
+          "clause": "первичный осмотр"
+        }
       ],
       "effective_from": "2022-03-24",
       "effective_to": "",
@@ -38,9 +48,18 @@
       "profile": "STA",
       "severity": "major",
       "enabled": true,
-      "params": { "REQUIRED_ATTRS": ["dose", "route", "freq"] },
+      "params": {
+        "REQUIRED_ATTRS": [
+          "dose",
+          "route",
+          "freq"
+        ]
+      },
       "sources": [
-        { "order_no": "ҚР-ДСМ-27", "date": "2022-03-24" }
+        {
+          "order_no": "ҚР-ДСМ-27",
+          "date": "2022-03-24"
+        }
       ],
       "effective_from": "2022-03-24",
       "effective_to": "",
@@ -54,7 +73,10 @@
       "enabled": true,
       "params": {},
       "sources": [
-        { "order_no": "ҚР-ДСМ-27", "date": "2022-03-24" }
+        {
+          "order_no": "ҚР-ДСМ-27",
+          "date": "2022-03-24"
+        }
       ],
       "effective_from": "2022-03-24",
       "effective_to": "",
@@ -66,15 +88,25 @@
       "profile": "STA",
       "severity": "minor",
       "enabled": true,
-      "params": { "LAB_NAME_HINTS": ["оак", "общий анализ крови", "cbc", "hemogram"], "MAX_HOURS": 24 },
+      "params": {
+        "LAB_NAME_HINTS": [
+          "оак",
+          "общий анализ крови",
+          "cbc",
+          "hemogram"
+        ],
+        "MAX_HOURS": 24
+      },
       "sources": [
-        { "order_no": "ҚР-ДСМ-27", "date": "2022-03-24" }
+        {
+          "order_no": "ҚР-ДСМ-27",
+          "date": "2022-03-24"
+        }
       ],
       "effective_from": "2022-03-24",
       "effective_to": "",
       "notes": "Разрешённая задержка до 24 часов."
     },
-
     {
       "id": "DAY-001",
       "title": "Ежедневная запись для дневного стационара (в день посещения)",
@@ -83,7 +115,11 @@
       "enabled": true,
       "params": {},
       "sources": [
-        { "order_no": "106", "date": "2023-06-07", "title": "Стационарозамещающие условия" }
+        {
+          "order_no": "106",
+          "date": "2023-06-07",
+          "title": "Стационарозамещающие условия"
+        }
       ],
       "effective_from": "2023-06-07",
       "effective_to": "",
@@ -95,24 +131,37 @@
       "profile": "DAY",
       "severity": "major",
       "enabled": true,
-      "params": { "REQUIRE_SECTIONS": ["план лечения", "информированное согласие"] },
+      "params": {
+        "REQUIRE_SECTIONS": [
+          "план лечения",
+          "информированное согласие"
+        ]
+      },
       "sources": [
-        { "order_no": "106", "date": "2023-06-07" }
+        {
+          "order_no": "106",
+          "date": "2023-06-07"
+        }
       ],
       "effective_from": "2023-06-07",
       "effective_to": "",
       "notes": "Наличие плана и согласия в документации дневного стационара."
     },
-
     {
       "id": "ER-001",
       "title": "Триаж в приёмном отделении (≤ 15 минут)",
       "profile": "ER",
       "severity": "critical",
       "enabled": true,
-      "params": { "TRIAGE_MAX_MIN": 15 },
+      "params": {
+        "TRIAGE_MAX_MIN": 15
+      },
       "sources": [
-        { "order_no": "ҚР ДСМ-27", "date": "2021-04-02", "title": "Экстренная помощь в приёмных отделениях" }
+        {
+          "order_no": "ҚР ДСМ-27",
+          "date": "2021-04-02",
+          "title": "Экстренная помощь в приёмных отделениях"
+        }
       ],
       "effective_from": "2021-04-02",
       "effective_to": "",
@@ -124,9 +173,14 @@
       "profile": "ER",
       "severity": "major",
       "enabled": true,
-      "params": { "MAX_OBSERVATION_HOURS": 24 },
+      "params": {
+        "MAX_OBSERVATION_HOURS": 24
+      },
       "sources": [
-        { "order_no": "ҚР ДСМ-27", "date": "2021-04-02" }
+        {
+          "order_no": "ҚР ДСМ-27",
+          "date": "2021-04-02"
+        }
       ],
       "effective_from": "2021-04-02",
       "effective_to": "",
@@ -138,9 +192,15 @@
       "profile": "ER",
       "severity": "critical",
       "enabled": true,
-      "params": { "ECG_MAX_MIN": 10 },
+      "params": {
+        "ECG_MAX_MIN": 10
+      },
       "sources": [
-        { "order_no": "ҚР ДСМ-139", "date": "2021-12-31", "title": "Кардиологическая помощь" }
+        {
+          "order_no": "ҚР ДСМ-139",
+          "date": "2021-12-31",
+          "title": "Кардиологическая помощь"
+        }
       ],
       "effective_from": "2021-12-31",
       "effective_to": "",
@@ -152,25 +212,43 @@
       "profile": "CAR",
       "severity": "critical",
       "enabled": true,
-      "params": { "ECG_MAX_MIN": 10 },
+      "params": {
+        "ECG_MAX_MIN": 10
+      },
       "sources": [
-        { "order_no": "ҚР ДСМ-139", "date": "2021-12-31" }
+        {
+          "order_no": "ҚР ДСМ-139",
+          "date": "2021-12-31"
+        }
       ],
       "effective_from": "2021-12-31",
       "effective_to": "",
       "notes": ""
     },
-
     {
       "id": "INF-001",
       "title": "Инфекционный контроль: изоляция/бокс при показаниях",
       "profile": "INF",
       "severity": "major",
       "enabled": true,
-      "params": { "KEYWORDS": ["изоляц", "бокс", "контактная изоляция"] },
+      "params": {
+        "KEYWORDS": [
+          "изоляц",
+          "бокс",
+          "контактная изоляция"
+        ]
+      },
       "sources": [
-        { "order_no": "ҚР ДСМ-40", "date": "2023-03-17", "title": "Инфекционные заболевания" },
-        { "order_no": "ҚР ДСМ-114", "date": "2021-11-12", "title": "Санитарные правила (ООИ)" }
+        {
+          "order_no": "ҚР ДСМ-40",
+          "date": "2023-03-17",
+          "title": "Инфекционные заболевания"
+        },
+        {
+          "order_no": "ҚР ДСМ-114",
+          "date": "2021-11-12",
+          "title": "Санитарные правила (ООИ)"
+        }
       ],
       "effective_from": "2023-03-17",
       "effective_to": "",
@@ -182,15 +260,25 @@
       "profile": "INF",
       "severity": "minor",
       "enabled": true,
-      "params": { "LAB_NAME_HINTS": ["оак", "общий анализ крови", "cbc", "hemogram"], "MAX_HOURS": 24 },
+      "params": {
+        "LAB_NAME_HINTS": [
+          "оак",
+          "общий анализ крови",
+          "cbc",
+          "hemogram"
+        ],
+        "MAX_HOURS": 24
+      },
       "sources": [
-        { "order_no": "ҚР ДСМ-40", "date": "2023-03-17" }
+        {
+          "order_no": "ҚР ДСМ-40",
+          "date": "2023-03-17"
+        }
       ],
       "effective_from": "2023-03-17",
       "effective_to": "",
       "notes": ""
     },
-
     {
       "id": "OBG-001",
       "title": "Акушерство/гинекология: ежедневные записи",
@@ -199,7 +287,11 @@
       "enabled": true,
       "params": {},
       "sources": [
-        { "order_no": "ҚР ДСМ-92", "date": "2021-08-26", "title": "Акушерско-гинекологическая помощь" }
+        {
+          "order_no": "ҚР ДСМ-92",
+          "date": "2021-08-26",
+          "title": "Акушерско-гинекологическая помощь"
+        }
       ],
       "effective_from": "2021-08-26",
       "effective_to": "",
@@ -211,15 +303,19 @@
       "profile": "OBG",
       "severity": "critical",
       "enabled": true,
-      "params": { "ПЕРВИЧНЫЙ_ОСМОТР_ЧАСОВ": 6 },
+      "params": {
+        "ПЕРВИЧНЫЙ_ОСМОТР_ЧАСОВ": 6
+      },
       "sources": [
-        { "order_no": "ҚР ДСМ-92", "date": "2021-08-26" }
+        {
+          "order_no": "ҚР ДСМ-92",
+          "date": "2021-08-26"
+        }
       ],
       "effective_from": "2021-08-26",
       "effective_to": "",
       "notes": ""
     },
-
     {
       "id": "RHEUM-001",
       "title": "Ревматология: ежедневные записи",
@@ -228,28 +324,36 @@
       "enabled": true,
       "params": {},
       "sources": [
-        { "order_no": "ҚР ДСМ-45", "date": "2023-03-28", "title": "Ревматологическая помощь" }
+        {
+          "order_no": "ҚР ДСМ-45",
+          "date": "2023-03-28",
+          "title": "Ревматологическая помощь"
+        }
       ],
       "effective_from": "2023-03-28",
       "effective_to": "",
       "notes": ""
     },
-
     {
       "id": "NEO-002",
       "title": "Неонатология: первичный осмотр новорожденного (≤ 2 ч)",
       "profile": "NEO",
       "severity": "critical",
       "enabled": true,
-      "params": { "ПЕРВИЧНЫЙ_ОСМОТР_ЧАСОВ": 2 },
+      "params": {
+        "ПЕРВИЧНЫЙ_ОСМОТР_ЧАСОВ": 2
+      },
       "sources": [
-        { "order_no": "№ 52", "date": "2023-03-31", "title": "Неонатальная помощь" }
+        {
+          "order_no": "№ 52",
+          "date": "2023-03-31",
+          "title": "Неонатальная помощь"
+        }
       ],
       "effective_from": "2023-03-31",
       "effective_to": "",
       "notes": ""
     },
-
     {
       "id": "NEPH-001",
       "title": "Нефрология: ежедневные записи",
@@ -258,13 +362,16 @@
       "enabled": true,
       "params": {},
       "sources": [
-        { "order_no": "ҚР ДСМ-114", "date": "2022-10-14", "title": "Нефрологическая помощь" }
+        {
+          "order_no": "ҚР ДСМ-114",
+          "date": "2022-10-14",
+          "title": "Нефрологическая помощь"
+        }
       ],
       "effective_from": "2022-10-14",
       "effective_to": "",
       "notes": ""
     },
-
     {
       "id": "PUL-001",
       "title": "Пульмонология: ежедневные записи",
@@ -273,13 +380,16 @@
       "enabled": true,
       "params": {},
       "sources": [
-        { "order_no": "№ 47", "date": "2025-05-28", "title": "Пульмонологическая помощь" }
+        {
+          "order_no": "№ 47",
+          "date": "2025-05-28",
+          "title": "Пульмонологическая помощь"
+        }
       ],
       "effective_from": "2025-05-28",
       "effective_to": "",
       "notes": ""
     },
-
     {
       "id": "URO-001",
       "title": "Урология/андрология: ежедневные записи",
@@ -288,13 +398,16 @@
       "enabled": true,
       "params": {},
       "sources": [
-        { "order_no": "№ 83", "date": "2023-05-18", "title": "Урологическая и андрологическая помощь" }
+        {
+          "order_no": "№ 83",
+          "date": "2023-05-18",
+          "title": "Урологическая и андрологическая помощь"
+        }
       ],
       "effective_from": "2023-05-18",
       "effective_to": "",
       "notes": ""
     },
-
     {
       "id": "GIH-001",
       "title": "Гастроэнтерология/гепатология: ежедневные записи",
@@ -303,13 +416,16 @@
       "enabled": true,
       "params": {},
       "sources": [
-        { "order_no": "№ 48", "date": "2023-03-29", "title": "Гастроэнтерологическая и гепатологическая помощь" }
+        {
+          "order_no": "№ 48",
+          "date": "2023-03-29",
+          "title": "Гастроэнтерологическая и гепатологическая помощь"
+        }
       ],
       "effective_from": "2023-03-29",
       "effective_to": "",
       "notes": ""
     },
-
     {
       "id": "NEURO-001",
       "title": "Нейрохирургия: ежедневные записи",
@@ -318,13 +434,16 @@
       "enabled": true,
       "params": {},
       "sources": [
-        { "order_no": "ҚР ДСМ-20", "date": "2022-02-28", "title": "Нейрохирургическая помощь" }
+        {
+          "order_no": "ҚР ДСМ-20",
+          "date": "2022-02-28",
+          "title": "Нейрохирургическая помощь"
+        }
       ],
       "effective_from": "2022-02-28",
       "effective_to": "",
       "notes": ""
     },
-
     {
       "id": "TRAUMA-001",
       "title": "Травматология/ортопедия: ежедневные записи",
@@ -333,13 +452,16 @@
       "enabled": true,
       "params": {},
       "sources": [
-        { "order_no": "ҚР ДСМ-1", "date": "2022-01-06", "title": "Травматолого-ортопедическая помощь" }
+        {
+          "order_no": "ҚР ДСМ-1",
+          "date": "2022-01-06",
+          "title": "Травматолого-ортопедическая помощь"
+        }
       ],
       "effective_from": "2022-01-06",
       "effective_to": "",
       "notes": ""
     },
-
     {
       "id": "HEM-001",
       "title": "Гематология (взрослые): ежедневные записи",
@@ -348,13 +470,16 @@
       "enabled": true,
       "params": {},
       "sources": [
-        { "order_no": "ҚР ДСМ-130", "date": "2021-12-20", "title": "Гематологическая помощь взрослым" }
+        {
+          "order_no": "ҚР ДСМ-130",
+          "date": "2021-12-20",
+          "title": "Гематологическая помощь взрослым"
+        }
       ],
       "effective_from": "2021-12-20",
       "effective_to": "",
       "notes": ""
     },
-
     {
       "id": "ONC-001",
       "title": "Онкология: ежедневные записи",
@@ -363,7 +488,11 @@
       "enabled": true,
       "params": {},
       "sources": [
-        { "order_no": "ҚР ДСМ-112", "date": "2021-11-12", "title": "Онкологическая помощь" }
+        {
+          "order_no": "ҚР ДСМ-112",
+          "date": "2021-11-12",
+          "title": "Онкологическая помощь"
+        }
       ],
       "effective_from": "2021-11-12",
       "effective_to": "",
@@ -377,13 +506,16 @@
       "enabled": true,
       "params": {},
       "sources": [
-        { "order_no": "№ 60", "date": "2024-08-13", "title": "Детская онкологическая и гематологическая помощь" }
+        {
+          "order_no": "№ 60",
+          "date": "2024-08-13",
+          "title": "Детская онкологическая и гематологическая помощь"
+        }
       ],
       "effective_from": "2024-08-13",
       "effective_to": "",
       "notes": ""
     },
-
     {
       "id": "PED-001",
       "title": "Педиатрия: ежедневные записи",
@@ -392,7 +524,11 @@
       "enabled": true,
       "params": {},
       "sources": [
-        { "order_no": "ҚР ДСМ-25", "date": "2022-03-15", "title": "Педиатрическая помощь" }
+        {
+          "order_no": "ҚР ДСМ-25",
+          "date": "2022-03-15",
+          "title": "Педиатрическая помощь"
+        }
       ],
       "effective_from": "2022-03-15",
       "effective_to": "",
@@ -404,9 +540,14 @@
       "profile": "PED",
       "severity": "critical",
       "enabled": true,
-      "params": { "ПЕРВИЧНЫЙ_ОСМОТР_ЧАСОВ": 6 },
+      "params": {
+        "ПЕРВИЧНЫЙ_ОСМОТР_ЧАСОВ": 6
+      },
       "sources": [
-        { "order_no": "ҚР ДСМ-25", "date": "2022-03-15" }
+        {
+          "order_no": "ҚР ДСМ-25",
+          "date": "2022-03-15"
+        }
       ],
       "effective_from": "2022-03-15",
       "effective_to": "",
@@ -418,9 +559,18 @@
       "profile": "PED",
       "severity": "major",
       "enabled": true,
-      "params": { "REQUIRED_ATTRS": ["dose", "route", "freq"] },
+      "params": {
+        "REQUIRED_ATTRS": [
+          "dose",
+          "route",
+          "freq"
+        ]
+      },
       "sources": [
-        { "order_no": "ҚР ДСМ-25", "date": "2022-03-15" }
+        {
+          "order_no": "ҚР ДСМ-25",
+          "date": "2022-03-15"
+        }
       ],
       "effective_from": "2022-03-15",
       "effective_to": "",
@@ -434,9 +584,250 @@
       "enabled": true,
       "params": {},
       "sources": [
-        { "order_no": "ҚР ДСМ-25", "date": "2022-03-15" }
+        {
+          "order_no": "ҚР ДСМ-25",
+          "date": "2022-03-15"
+        }
       ],
       "effective_from": "2022-03-15",
+      "effective_to": "",
+      "notes": ""
+    },
+    {
+      "id": "SUR-001",
+      "title": "Хирургия: предоперационный осмотр и план вмешательства до операции",
+      "profile": "SUR",
+      "severity": "major",
+      "enabled": true,
+      "params": {
+        "REQUIRE_SECTIONS": [
+          "предоперационный осмотр",
+          "план операции",
+          "информированное согласие"
+        ]
+      },
+      "sources": [
+        {
+          "order_no": "№ 41",
+          "date": "2023-03-20",
+          "title": "Хирургическая помощь"
+        }
+      ],
+      "effective_from": "2023-03-20",
+      "effective_to": "",
+      "notes": ""
+    },
+    {
+      "id": "SUR-010",
+      "title": "Хирургия: протокол операции оформлен в день вмешательства",
+      "profile": "SUR",
+      "severity": "major",
+      "enabled": true,
+      "params": {},
+      "sources": [
+        {
+          "order_no": "№ 41",
+          "date": "2023-03-20",
+          "title": "Хирургическая помощь"
+        }
+      ],
+      "effective_from": "2023-03-20",
+      "effective_to": "",
+      "notes": ""
+    },
+    {
+      "id": "SUR-011",
+      "title": "Хирургия: полнота операционного протокола",
+      "profile": "SUR",
+      "severity": "major",
+      "enabled": true,
+      "params": {
+        "REQUIRE_FIELDS": [
+          "диагноз",
+          "операция",
+          "хирург",
+          "ассист",
+          "анестез",
+          "объем",
+          "кровопотер",
+          "осложн",
+          "дренаж",
+          "материал",
+          "описан"
+        ]
+      },
+      "sources": [
+        {
+          "order_no": "№ 41",
+          "date": "2023-03-20",
+          "title": "Хирургическая помощь"
+        }
+      ],
+      "effective_from": "2023-03-20",
+      "effective_to": "",
+      "notes": ""
+    },
+    {
+      "id": "ANR-001",
+      "title": "Анестезиология: преданестезиологический осмотр до операции (ASA/Mallampati)",
+      "profile": "ANR",
+      "severity": "critical",
+      "enabled": true,
+      "params": {},
+      "sources": [
+        {
+          "order_no": "№ 78",
+          "date": "2023-04-26",
+          "title": "Анестезиология и реаниматология"
+        }
+      ],
+      "effective_from": "2023-04-26",
+      "effective_to": "",
+      "notes": ""
+    },
+    {
+      "id": "ANR-010",
+      "title": "Анестезиология: анестезиологическая карта/наркозный лист",
+      "profile": "ANR",
+      "severity": "major",
+      "enabled": true,
+      "params": {},
+      "sources": [
+        {
+          "order_no": "№ 78",
+          "date": "2023-04-26",
+          "title": "Анестезиология и реаниматология"
+        }
+      ],
+      "effective_from": "2023-04-26",
+      "effective_to": "",
+      "notes": ""
+    },
+    {
+      "id": "NEUR-001",
+      "title": "Неврология (взрослые): ежедневные записи",
+      "profile": "NEUR",
+      "severity": "major",
+      "enabled": true,
+      "params": {},
+      "sources": [
+        {
+          "order_no": "№ 53",
+          "date": "2025-06-04",
+          "title": "Неврологическая помощь (взрослые)"
+        }
+      ],
+      "effective_from": "2025-06-04",
+      "effective_to": "",
+      "notes": ""
+    },
+    {
+      "id": "NEUR-002",
+      "title": "Неврология (взрослые): первичный осмотр ≤ 6 ч",
+      "profile": "NEUR",
+      "severity": "critical",
+      "enabled": true,
+      "params": {
+        "ПЕРВИЧНЫЙ_ОСМОТР_ЧАСОВ": 6
+      },
+      "sources": [
+        {
+          "order_no": "№ 53",
+          "date": "2025-06-04",
+          "title": "Неврологическая помощь (взрослые)"
+        }
+      ],
+      "effective_from": "2025-06-04",
+      "effective_to": "",
+      "notes": ""
+    },
+    {
+      "id": "PSURG-001",
+      "title": "Детская хирургия: ежедневные записи",
+      "profile": "PSURG",
+      "severity": "major",
+      "enabled": true,
+      "params": {},
+      "sources": [
+        {
+          "order_no": "№ 81",
+          "date": "2023-05-15"
+        }
+      ],
+      "effective_from": "2023-05-15",
+      "effective_to": "",
+      "notes": ""
+    },
+    {
+      "id": "PSURG-002",
+      "title": "Детская хирургия: первичный осмотр ≤ 6 ч",
+      "profile": "PSURG",
+      "severity": "critical",
+      "enabled": true,
+      "params": {
+        "ПЕРВИЧНЫЙ_ОСМОТР_ЧАСОВ": 6
+      },
+      "sources": [
+        {
+          "order_no": "№ 81",
+          "date": "2023-05-15"
+        }
+      ],
+      "effective_from": "2023-05-15",
+      "effective_to": "",
+      "notes": ""
+    },
+    {
+      "id": "CHR-001",
+      "title": "Хронические заболевания: план диспансерного наблюдения оформлен",
+      "profile": "CHR",
+      "severity": "major",
+      "enabled": true,
+      "params": {
+        "KEYWORDS": [
+          "диспансер",
+          "наблюден",
+          "диспансеризац"
+        ]
+      },
+      "sources": [
+        {
+          "order_no": "ҚР ДСМ-149/2020",
+          "date": "2020-10-23",
+          "title": "Правила для хронических заболеваний"
+        }
+      ],
+      "effective_from": "2020-10-23",
+      "effective_to": "",
+      "notes": ""
+    },
+    {
+      "id": "SOC-001",
+      "title": "Социально значимые заболевания: маршрутизация/учёт отмечены",
+      "profile": "SOC",
+      "severity": "minor",
+      "enabled": true,
+      "params": {
+        "KEYWORDS": [
+          "туберкул",
+          "вич",
+          "гепатит b",
+          "гепатит c",
+          "сахарный диабет 1 типа",
+          "онкологическ",
+          "шизофрен",
+          "ожирение 3",
+          "гемофил"
+        ]
+      },
+      "sources": [
+        {
+          "order_no": "ҚР ДСМ-108/2020",
+          "date": "2020-09-23",
+          "title": "Перечень социально значимых заболеваний"
+        }
+      ],
+      "effective_from": "2020-09-23",
       "effective_to": "",
       "notes": ""
     }
