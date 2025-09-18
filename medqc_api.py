@@ -106,7 +106,6 @@ def ensure_core_schema():
       created_at TEXT NOT NULL
     );
 
-    -- сырое поле для «склеенного» текста (medqc_section ожидает его)
     CREATE TABLE IF NOT EXISTS raw(
       doc_id     TEXT PRIMARY KEY,
       content    TEXT,
@@ -154,9 +153,24 @@ def ensure_core_schema():
       sources_json  TEXT,
       created_at    TEXT NOT NULL
     );
+
+    -- Новая таблица: результат по каждому правилу
+    CREATE TABLE IF NOT EXISTS rule_results(
+      id         INTEGER PRIMARY KEY AUTOINCREMENT,
+      doc_id     TEXT NOT NULL,
+      rule_id    TEXT NOT NULL,
+      profile    TEXT,
+      severity   TEXT,
+      passed     INTEGER NOT NULL,  -- 1=OK, 0=есть нарушение (fail)
+      message    TEXT,              -- краткое пояснение/агрегат
+      created_at TEXT NOT NULL
+    );
     """)
     conn.commit()
     conn.close()
+
+
+
 
 # import после функций
 from medqc_rules import (
@@ -328,6 +342,30 @@ def api_report(doc_id: str, format: str = Query("html"), mask: int = Query(0)):
         html.append("<tr><td colspan='4'>Нарушений не выявлено</td></tr>")
     html += ["</tbody></table>", "</body></html>"]
     return HTMLResponse("\n".join(html))
+
+
+@app.get("/v1/rules/{doc_id}")
+def list_rule_results(doc_id: str):
+    ensure_core_schema()
+    conn = get_conn()
+    rows = conn.execute("""
+        SELECT rule_id, profile, severity, passed, message, created_at
+        FROM rule_results
+        WHERE doc_id=?
+        ORDER BY passed ASC, severity DESC, rule_id
+    """, (doc_id,)).fetchall()
+    conn.close()
+    data = [dict(r) for r in rows]
+    return {
+        "doc_id": doc_id,
+        "total": len(data),
+        "passed": sum(1 for r in data if r["passed"] == 1),
+        "failed": sum(1 for r in data if r["passed"] == 0),
+        "items": data
+    }
+
+
+
 
 @app.post("/v1/ingest")
 async def ingest_file(
