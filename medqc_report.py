@@ -322,6 +322,9 @@ def main():
     ap.add_argument("--doc-id", required=True)
     ap.add_argument("--format", choices=["html","json","md"], default="html")
     ap.add_argument("--out", help="Путь для сохранения (по умолчанию cases/<doc_id>/report.<ext>)")
+    ap.add_argument("--package-name", default="")     # добавлено
+    ap.add_argument("--package-version", default="")  # добавлено
+    ap.add_argument("--mask", action="store_true")    # добавлено
     args = ap.parse_args()
 
     db.init_schema()
