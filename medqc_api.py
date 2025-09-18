@@ -4,12 +4,13 @@ import uuid
 import json
 import hashlib
 import sqlite3
+import subprocess
 from datetime import datetime
 from typing import List, Dict, Any, Optional
 
-from fastapi import FastAPI, UploadFile, File, Form, Header, HTTPException, Depends
+from fastapi import FastAPI, UploadFile, File, Form, Header, HTTPException, Depends, Query, Path
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, HTMLResponse, PlainTextResponse
 
 # ======== ENV / CONFIG ========
 DB_PATH = os.getenv("MEDQC_DB", "/app/medqc.db")
@@ -21,12 +22,12 @@ UPLOAD_DIR = os.getenv("UPLOAD_DIR", "/app/uploads")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 # ======== APP ========
-app = FastAPI(title="MedQC API", version="1.0.0")
+app = FastAPI(title="MedQC API", version="1.1.0")
 
 # CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # при желании ограничьте фронтом: ["http://localhost:8080", "http://localhost:3000"]
+    allow_origins=["*"],  # при желании ограничьте фронтом
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -100,7 +101,68 @@ def ensure_docs_table():
     conn.commit()
     conn.close()
 
-# ======== RULES/ORCHESTRATOR IMPORTS ========
+def ensure_core_schema():
+    """
+    Создаёт минимально необходимые таблицы, если их нет.
+    Безопасно для повторного вызова.
+    """
+    conn = get_conn()
+    conn.executescript("""
+    CREATE TABLE IF NOT EXISTS artifacts(
+      id         INTEGER PRIMARY KEY AUTOINCREMENT,
+      doc_id     TEXT NOT NULL,
+      kind       TEXT NOT NULL,
+      content    TEXT,
+      meta_json  TEXT,
+      created_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS sections(
+      id         INTEGER PRIMARY KEY AUTOINCREMENT,
+      doc_id     TEXT NOT NULL,
+      title      TEXT,
+      start      INTEGER,
+      end        INTEGER,
+      created_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS entities(
+      id          INTEGER PRIMARY KEY AUTOINCREMENT,
+      doc_id      TEXT NOT NULL,
+      etype       TEXT,
+      ts          TEXT,
+      span_start  INTEGER,
+      span_end    INTEGER,
+      value_json  TEXT,
+      source      TEXT,
+      confidence  REAL,
+      created_at  TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS events(
+      id         INTEGER PRIMARY KEY AUTOINCREMENT,
+      doc_id     TEXT NOT NULL,
+      kind       TEXT,
+      ts         TEXT,
+      payload    TEXT,
+      created_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS violations(
+      id            INTEGER PRIMARY KEY AUTOINCREMENT,
+      doc_id        TEXT NOT NULL,
+      rule_id       TEXT NOT NULL,
+      severity      TEXT NOT NULL,
+      message       TEXT NOT NULL,
+      evidence_json TEXT,
+      sources_json  TEXT,
+      created_at    TEXT NOT NULL
+    );
+    """)
+    conn.commit()
+    conn.close()
+
+# ======== RULES/ORCHESTRATOR ========
 from medqc_rules import (
     infer_profiles,
     get_doc as rules_get_doc,
@@ -125,10 +187,11 @@ def healthz_db():
 @app.post("/v1/admin/migrate")
 def admin_migrate(_: bool = Depends(require_api_key)):
     ensure_docs_table()
+    ensure_core_schema()
     return {"status": "migrated", "db": DB_PATH}
 
 @app.get("/v1/docs/{doc_id}")
-def get_doc(doc_id: str):
+def get_doc(doc_id: str = Path(...)):
     conn = get_conn()
     row = conn.execute("SELECT * FROM docs WHERE doc_id=?", (doc_id,)).fetchone()
     conn.close()
@@ -158,7 +221,7 @@ def get_violations(doc_id: str) -> List[Dict[str, Any]]:
     return [dict(r) for r in rows]
 
 @app.get("/v1/debug/rules")
-def debug_rules(doc_id: str):
+def debug_rules(doc_id: str = Query(...)):
     conn = get_conn()
     doc = rules_get_doc(conn, doc_id)
     if not doc:
@@ -181,6 +244,7 @@ def api_run_rules(
     doc_id: str = Form(...),
     _: bool = Depends(require_api_key)
 ):
+    ensure_core_schema()
     try:
         result = run_rules_only(
             doc_id,
@@ -190,6 +254,92 @@ def api_run_rules(
         return JSONResponse(content=result)
     except Exception as ex:
         raise HTTPException(status_code=500, detail=f"run-rules failed: {ex}")
+
+@app.post("/v1/pipeline/{doc_id}")
+def api_run_pipeline(doc_id: str, _: bool = Depends(require_api_key)):
+    """
+    Ручной запуск полного пайплайна по doc_id.
+    """
+    ensure_docs_table()
+    ensure_core_schema()
+    try:
+        run_all(
+            doc_id=doc_id,
+            package=DEFAULT_RULES_PACKAGE,
+            version=DEFAULT_RULES_VERSION
+        )
+        return {"doc_id": doc_id, "status": "OK"}
+    except subprocess.CalledProcessError as cpe:
+        # соберем хвост stderr/stdout, если есть
+        return JSONResponse(
+            status_code=202,
+            content={
+                "doc_id": doc_id,
+                "status": "PIPELINE_ERROR",
+                "failed_cmd": " ".join(cpe.cmd) if getattr(cpe, "cmd", None) else None,
+                "stderr_tail": getattr(cpe, "stderr", None),
+            }
+        )
+    except Exception as ex:
+        return JSONResponse(
+            status_code=202,
+            content={"doc_id": doc_id, "status": "PIPELINE_ERROR", "error": str(ex)}
+        )
+
+@app.get("/v1/report/{doc_id}")
+def api_report(doc_id: str, format: str = Query("html"), mask: int = Query(0)):
+    """
+    Возвращает отчёт по документу.
+    Если у тебя уже есть medqc_report.py, можно дергать его.
+    Иначе — соберём простой HTML из БД.
+    """
+    if format not in ("html", "json"):
+        raise HTTPException(400, "format must be html or json")
+
+    conn = get_conn()
+    conn.row_factory = sqlite3.Row
+    doc = conn.execute("SELECT * FROM docs WHERE doc_id=?", (doc_id,)).fetchone()
+    if not doc:
+        conn.close()
+        raise HTTPException(404, "doc_id not found")
+
+    stats = {
+        "sections": conn.execute("SELECT COUNT(*) FROM sections WHERE doc_id=?", (doc_id,)).fetchone()[0],
+        "entities": conn.execute("SELECT COUNT(*) FROM entities WHERE doc_id=?", (doc_id,)).fetchone()[0],
+        "events":   conn.execute("SELECT COUNT(*) FROM events   WHERE doc_id=?", (doc_id,)).fetchone()[0],
+    }
+    viol = conn.execute("""
+        SELECT rule_id, severity, message, created_at
+        FROM violations
+        WHERE doc_id=?
+        ORDER BY created_at DESC
+    """, (doc_id,)).fetchall()
+    violations = [dict(r) for r in viol]
+    conn.close()
+
+    if format == "json":
+        return JSONResponse({"doc": dict(doc), "stats": stats, "violations": violations})
+
+    # простой HTML-репорт
+    html = [
+        "<html><head><meta charset='utf-8'><title>MedQC Report</title>",
+        "<style>body{font-family:system-ui,Arial,sans-serif;padding:16px} .crit{color:#b30000} .maj{color:#b36b00} .min{color:#666} table{border-collapse:collapse;width:100%} td,th{border:1px solid #ddd;padding:8px} th{background:#f8f8f8;text-align:left}</style>",
+        "</head><body>",
+        f"<h2>Отчёт по документу {doc_id}</h2>",
+        "<h3>Статистика</h3>",
+        f"<ul><li>Разделов: {stats['sections']}</li><li>Сущностей: {stats['entities']}</li><li>Событий: {stats['events']}</li></ul>",
+        "<h3>Нарушения</h3>",
+        "<table><thead><tr><th>Правило</th><th>Критичность</th><th>Сообщение</th><th>Время</th></tr></thead><tbody>"
+    ]
+    sev_cls = {"critical":"crit","major":"maj","minor":"min"}
+    if violations:
+        for v in violations:
+            cls = sev_cls.get(v["severity"], "")
+            html.append(f"<tr><td>{v['rule_id']}</td><td class='{cls}'>{v['severity']}</td><td>{v['message']}</td><td>{v['created_at']}</td></tr>")
+    else:
+        html.append("<tr><td colspan='4'>Нарушений не выявлено</td></tr>")
+    html += ["</tbody></table>", "</body></html>"]
+    return HTMLResponse("\n".join(html))
 
 @app.post("/v1/ingest")
 async def ingest_file(
@@ -202,6 +352,7 @@ async def ingest_file(
     Принимает файл (PDF/DOCX), сохраняет запись в docs, запускает полный пайплайн и возвращает doc_id.
     """
     ensure_docs_table()
+    ensure_core_schema()
 
     doc_id = f"KZ-{datetime.utcnow().strftime('%Y%m%d')}-{uuid.uuid4().hex[:8].upper()}"
 
@@ -233,19 +384,26 @@ async def ingest_file(
     finally:
         conn.close()
 
+    # полный пайплайн
     try:
         run_all(
             doc_id=doc_id,
             package=DEFAULT_RULES_PACKAGE,
             version=DEFAULT_RULES_VERSION
         )
+        return {"doc_id": doc_id, "status": "OK"}
+    except subprocess.CalledProcessError as cpe:
+        return JSONResponse(
+            status_code=202,
+            content={
+                "doc_id": doc_id,
+                "status": "PIPELINE_ERROR",
+                "failed_cmd": " ".join(cpe.cmd) if getattr(cpe, "cmd", None) else None,
+                "stderr_tail": getattr(cpe, "stderr", None)
+            }
+        )
     except Exception as ex:
         return JSONResponse(
             status_code=202,
-            content={"doc_id": doc_id, "status": "PIPELINE_ERROR",
-                     "failed_cmd": str(getattr(ex, 'cmd', 'unknown')),
-                     "stderr_tail": getattr(ex, 'stderr', None),
-                     "steps": getattr(ex, 'steps', None)}
+            content={"doc_id": doc_id, "status": "PIPELINE_ERROR", "error": str(ex)}
         )
-
-    return {"doc_id": doc_id, "status": "OK"}

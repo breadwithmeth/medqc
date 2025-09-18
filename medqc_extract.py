@@ -3,6 +3,19 @@ import json
 import sqlite3
 from datetime import datetime
 
+def ensure_artifacts_table(conn: sqlite3.Connection):
+    conn.executescript("""
+    CREATE TABLE IF NOT EXISTS artifacts(
+      id         INTEGER PRIMARY KEY AUTOINCREMENT,
+      doc_id     TEXT NOT NULL,
+      kind       TEXT NOT NULL,
+      content    TEXT,
+      meta_json  TEXT,
+      created_at TEXT NOT NULL
+    );
+    """)
+    conn.commit()
+
 def extract_pdf_text(path):
     try:
         import fitz  # PyMuPDF
@@ -37,6 +50,8 @@ def extract_docx_paragraphs(path):
 def run_extract(doc_id: str):
     db = os.getenv("MEDQC_DB", "/app/medqc.db")
     con = sqlite3.connect(db); con.row_factory = sqlite3.Row
+    ensure_artifacts_table(con)
+
     row = con.execute("SELECT path, filename FROM docs WHERE doc_id=?", (doc_id,)).fetchone()
     if not row:
         raise RuntimeError(f"doc_id={doc_id} не найден в docs.")
@@ -52,7 +67,6 @@ def run_extract(doc_id: str):
     else:
         if src.lower().endswith(".doc"):
             raise RuntimeError("Файл .doc не поддерживается. Конвертируйте в .docx.")
-        # пустим через PDF как дефолт
         try:
             pages, producer = extract_pdf_text(src)
         except Exception:
