@@ -1,76 +1,85 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-from __future__ import annotations
-import argparse, sys
-from pathlib import Path
-import medqc_db as db
 
-import re
+import os
+import json
+import argparse
+import sqlite3
+from typing import List
 
-def extract_pdf_text(path: Path):
+from medqc_db import DB_PATH, ensure_extract_tables, get_conn, get_doc_file_path
+
+# опциональные парсеры
+try:
     import fitz  # PyMuPDF
-    texts = []
-    producer = None
-    with fitz.open(str(path)) as doc:
-        producer = doc.metadata.get("producer") or doc.metadata.get("Producer")
-        for p in doc:
-            texts.append(p.get_text("text"))
-    return texts, producer
+except Exception:
+    fitz = None
+
+try:
+    import docx  # python-docx
+except Exception:
+    docx = None
 
 
-def extract_docx_text(path: Path):
-    import docx
-    d = docx.Document(str(path))
-    # DOCX не знает про страницы — вернём как один «лист»
-    text = "\n".join(p.text for p in d.paragraphs)
-    return [text], "python-docx"
+def extract_pdf_pages(path: str) -> List[str]:
+    if not fitz:
+        raise RuntimeError("PyMuPDF (pymupdf) не установлен в окружении контейнера.")
+    doc = fitz.open(path)
+    pages = []
+    for i in range(len(doc)):
+        pages.append(doc.load_page(i).get_text("text"))
+    doc.close()
+    return pages
+
+
+def extract_docx_paragraphs(path: str) -> List[str]:
+    if not docx:
+        raise RuntimeError("python-docx не установлен в окружении контейнера.")
+    d = docx.Document(path)
+    # соберём как pseudo-страницы по крупным блокам (для согласованности)
+    text = []
+    for p in d.paragraphs:
+        text.append(p.text or "")
+    content = "\n".join(text).strip()
+    # разбивать по страницам DOCX сложно; положим всю «страницу» как idx=0
+    return [content] if content else []
+
+
+def save_pages(conn: sqlite3.Connection, doc_id: str, pages: List[str]):
+    ensure_extract_tables(conn)
+    # очищаем прежние
+    conn.execute("DELETE FROM pages WHERE doc_id=?", (doc_id,))
+    # вставляем
+    for idx, txt in enumerate(pages):
+        conn.execute("INSERT INTO pages(doc_id, idx, text) VALUES(?,?,?)", (doc_id, idx, txt))
+    # также кладём «сырой» конкатенированный текст
+    conn.execute("INSERT OR REPLACE INTO raw(doc_id, content) VALUES(?,?)", (doc_id, "\n\n".join(pages)))
+
+
+def run_extract(doc_id: str) -> dict:
+    with get_conn() as conn:
+        src = get_doc_file_path(conn, doc_id)
+        if not src or not os.path.exists(src):
+            raise RuntimeError(f"Source file not found for doc_id={doc_id}. Проверь docs.src_path/path/filename и /app/uploads/{doc_id}/")
+        # определим формат
+        ext = os.path.splitext(src)[1].lower()
+        if ext in (".pdf",):
+            pages = extract_pdf_pages(src)
+        elif ext in (".docx",):
+            pages = extract_docx_paragraphs(src)
+        else:
+            raise RuntimeError(f"Unsupported file type: {ext}")
+        save_pages(conn, doc_id, pages)
+        conn.commit()
+        return {"doc_id": doc_id, "status": "extracted", "pages": len(pages)}
 
 
 def main():
-    ap = argparse.ArgumentParser(description="medqc-extract — извлечение текста")
+    ap = argparse.ArgumentParser()
     ap.add_argument("--doc-id", required=True)
     args = ap.parse_args()
+    print(json.dumps(run_extract(args.doc_id), ensure_ascii=False))
 
-    db.init_schema()
-    row = db.get_doc(args.doc_id)
-    if not row:
-        print(f"{{\"error\":{{\"code\":\"NO_DOC\",\"message\":\"unknown doc_id {args.doc_id}\"}}}}")
-        sys.exit(1)
-    src = Path(row["src_path"]).resolve()
-    ext = src.suffix.lower()
-
-    if ext == ".pdf":
-        pages_text, producer = extract_pdf_text(src)
-    elif ext == ".docx":
-        pages_text, producer = extract_docx_text(src)
-    else:
-        print(f"{{\"error\":{{\"code\":\"UNSUPPORTED\",\"message\":\"{ext}\"}}}}")
-        sys.exit(2)
-
-    full = "\n".join(pages_text)
-    # is_scanned для PDF: если суммарная длина текста слишком мала
-    is_scanned = (len("".join(pages_text).strip()) < 10)
-
-    # посчитать глобальные оффсеты
-    pages_rows = []
-    cur = 0
-    for i, t in enumerate(pages_text, start=1):
-        start = cur
-        end = cur + len(t)
-        pages_rows.append({"pageno": i, "start": start, "end": end, "text": t})
-        cur = end + 1  # учитываем перевод строки при объединении
-
-    db.upsert_raw_text(args.doc_id, is_scanned, len(pages_text), producer, "ru,kk", full)
-    db.replace_pages(args.doc_id, pages_rows)
-
-    import json
-    print(json.dumps({
-        "doc_id": args.doc_id,
-        "status": "extracted",
-        "pages": len(pages_rows),
-        "is_scanned": is_scanned,
-        "producer": producer
-    }, ensure_ascii=False, indent=2))
 
 if __name__ == "__main__":
     main()

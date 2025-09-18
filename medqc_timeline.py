@@ -1,177 +1,148 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""
-medqc-timeline — строит ленту событий по sections+entities и пишет в БД (таблица events.ts).
-"""
-from __future__ import annotations
-import argparse, re, json
+
+import os
+import re
+import json
+import argparse
+import sqlite3
 from datetime import datetime
-from typing import Optional, List, Dict, Any
-import medqc_db as db
+from typing import Any, Dict, List, Optional
 
-# Привязка типов секций к типам событий
-SECTION_EVENT_MAP = {
-    "admit": "admit",
-    "triage": "triage",
-    "initial_exam": "initial_exam",
-    "daily_note": "daily_note",
-    "ecg": "ecg",
-    "epicrisis": "epicrisis",
-}
+from medqc_db import DB_PATH, get_conn, get_sections, get_entities
 
-# Порядок попыток парсинга даты/времени
-DT_PARSE_ORDER = [
-    "%d.%m.%Y %H:%M:%S",
-    "%d.%m.%Y %H:%M",
-    "%d.%m.%Y",
-    "%Y-%m-%d %H:%M:%S",
-    "%Y-%m-%d %H:%M",
-    "%Y-%m-%d",
-    "%H:%M:%S",
-    "%H:%M",
-]
-
-def parse_dt_any(s: str) -> Optional[datetime]:
-    s = s.strip()
-    for fmt in DT_PARSE_ORDER:
+# Нормализация дат/времени
+def parse_iso_any(s: Optional[str]) -> Optional[datetime]:
+    if not s:
+        return None
+    s = str(s).strip()
+    for fmt in ("%Y-%m-%dT%H:%M:%S",
+                "%Y-%m-%dT%H:%M",
+                "%Y-%m-%d %H:%M:%S",
+                "%Y-%m-%d %H:%M",
+                "%Y-%m-%d"):
         try:
             return datetime.strptime(s, fmt)
         except Exception:
-            continue
-    return None
+            pass
+    # попытка ISO-подобного
+    try:
+        t = s.replace("Z", "")
+        if "+" in t:
+            t = t.split("+", 1)[0]
+        return datetime.fromisoformat(t)
+    except Exception:
+        return None
 
-# Дата/время в тексте: 21.08.2025[ HH:MM], 2025-08-21[ HH:MM], HH:MM[:SS]
-DT_RE = re.compile(
-    r"\b((?:\d{2}[.]){2}\d{4}(?:\s+\d{1,2}:\d{2}(?::\d{2})?)?|"
-    r"\d{4}-\d{2}-\d{2}(?:\s+\d{1,2}:\d{2}(?::\d{2})?)?|"
-    r"\d{1,2}:\d{2}(?::\d{2})?)\b"
-)
 
-def pick_section_timestamp(full_text: str, start: int, end: int) -> Optional[str]:
-    """Берём первый распознанный datetime внутри секции; возвращаем ISO без TZ (точность — до минут)."""
-    chunk = full_text[start:end]
-    for m in DT_RE.finditer(chunk):
-        dt = parse_dt_any(m.group(1))
-        if dt:
-            return dt.isoformat(timespec="minutes")
-    return None
+# Эвристики поиска дат в тексте (простой вариант)
+DATE_RE = re.compile(r"(?:(?:20|19)\d{2})[-./](?:0?[1-9]|1[0-2])[-./](?:0?[1-9]|[12]\d|3[01])(?:[ T](?:[01]?\d|2[0-3]):[0-5]\d(?::[0-5]\d)?)?")
+
+
+def init_events_schema(conn: sqlite3.Connection):
+    """
+    Создаём таблицу events, если её нет. Колонку времени называем ts.
+    НЕ используем ключевое слово 'when'.
+    """
+    conn.execute("""
+    CREATE TABLE IF NOT EXISTS events(
+      id INTEGER PRIMARY KEY,
+      doc_id TEXT NOT NULL,
+      kind TEXT NOT NULL,
+      ts TEXT,
+      value_json TEXT
+    );
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_events_doc ON events(doc_id, ts)")
+
+
+def clear_events(conn: sqlite3.Connection, doc_id: str):
+    conn.execute("DELETE FROM events WHERE doc_id=?", (doc_id,))
+
+
+def add_event(conn: sqlite3.Connection, doc_id: str, kind: str, ts: Optional[datetime], value: Optional[Dict[str, Any]] = None):
+    init_events_schema(conn)
+    conn.execute(
+        "INSERT INTO events(doc_id, kind, ts, value_json) VALUES(?,?,?,?)",
+        (doc_id, kind, (ts.strftime("%Y-%m-%dT%H:%M:%S") if ts else None), json.dumps(value or {}, ensure_ascii=False))
+    )
+
+
+def guess_admit_discharge_from_sections(sections: List[Dict[str, Any]]) -> Dict[str, Optional[datetime]]:
+    """
+    Очень простая эвристика: пытаемся найти по заголовкам.
+    """
+    admit = None
+    discharge = None
+    for s in sections:
+        title = (s.get("title") or s.get("name") or "").lower()
+        body = (s.get("text") or s.get("content") or "")
+        # поступление
+        if any(w in title for w in ("поступлен", "госпитал")):
+            m = DATE_RE.search(body)
+            if m:
+                admit = parse_iso_any(m.group(0))
+        # выписка
+        if any(w in title for w in ("выпис", "заключ", "эпикриз")):
+            m = DATE_RE.search(body)
+            if m:
+                discharge = parse_iso_any(m.group(0))
+    return {"admit": admit, "discharge": discharge}
+
 
 def build_timeline(doc_id: str) -> Dict[str, Any]:
-    db.init_schema()
+    with get_conn() as conn:
+        init_events_schema(conn)
+        clear_events(conn, doc_id)
 
-    doc = db.get_doc(doc_id)
-    if not doc:
-        return {"error": {"code": "NO_DOC", "message": f"unknown doc_id {doc_id}"}}
+        sections = get_sections(conn, doc_id)
+        entities = get_entities(conn, doc_id)
 
-    full = db.get_full_text(doc_id)
-    if not full:
-        return {"error": {"code": "NO_TEXT", "message": "run medqc-extract first"}}
+        # 1) события из сущностей (если они уже выделены экстракторами/NER)
+        # ожидаемые поля: entity.etype, value_json (с ts/when)
+        for e in entities:
+            et = (e.get("etype") or "").lower()
+            try:
+                data = json.loads(e.get("value_json") or "{}")
+            except Exception:
+                data = {}
+            # поддержим оба варианта: ts / when
+            tsv = data.get("ts") or data.get("when")
+            ts = parse_iso_any(tsv) if isinstance(tsv, str) else None
 
-    sections = db.get_sections(doc_id)
-    ents = db.get_entities(doc_id)
+            # простое сопоставление: первичный осмотр, ежедневные записи, лаборатория и т.д.
+            if et in ("exam_initial", "первичный осмотр"):
+                add_event(conn, doc_id, "initial_exam", ts, data)
+            elif et in ("discharge_summary", "эпикриз"):
+                # сам по себе эпикриз — это не discharge, но зафиксируем момент
+                add_event(conn, doc_id, "epicrisis", ts, data)
+            elif et in ("med_order", "назначен", "лист назначений"):
+                add_event(conn, doc_id, "med_order", ts, data)
+            elif et in ("complaint", "symptom", "жалоб", "симптом"):
+                add_event(conn, doc_id, "complaint", ts, data)
+            elif et in ("isolation", "infection_control", "изоляция"):
+                add_event(conn, doc_id, "infection_control", ts, data)
 
-    # Индексация всех дат/времени внутри каждой секции (для привязки лекарств/виталов)
-    section_dt_list: Dict[str, List[tuple[int, int, str]]] = {}
-    for s in sections:
-        chunk = full[s["start"]:s["end"]]
-        dts: List[tuple[int, int, str]] = []
-        for m in DT_RE.finditer(chunk):
-            dt = parse_dt_any(m.group(1))
-            if dt:
-                iso = dt.isoformat(timespec="minutes")
-                dts.append((s["start"] + m.start(1), s["start"] + m.end(1), iso))
-        section_dt_list[s["section_id"]] = dts
+        # 2) попытка угадать admit/discharge из секций, если их нет
+        ad = guess_admit_discharge_from_sections(sections)
+        if ad.get("admit"):
+            add_event(conn, doc_id, "admit", ad["admit"], {})
+        if ad.get("discharge"):
+            add_event(conn, doc_id, "discharge", ad["discharge"], {})
 
-    events: List[Dict[str, Any]] = []
+        conn.commit()
+        # вернём краткую сводку
+        cur = conn.execute("SELECT kind, ts FROM events WHERE doc_id=? ORDER BY ts", (doc_id,))
+        events = [{"kind": k, "ts": t} for (k, t) in cur.fetchall()]
+        return {"doc_id": doc_id, "events": events, "status": "timeline_built"}
 
-    # 1) События из самих секций (admit/triage/initial_exam/...):
-    for s in sections:
-        kind = SECTION_EVENT_MAP.get(s["kind"])
-        if not kind:
-            continue
-        iso = pick_section_timestamp(full, s["start"], s["end"]) or (doc["admit_dt"] if kind == "admit" else None)
-        events.append({
-            "kind": kind,
-            "when": iso,                 # db.replace_events сам положит в колонку ts
-            "section_id": s["section_id"],
-            "start": s["start"],
-            "end": s["end"],
-            "value": {"name": s["name"]}
-        })
-
-    # 2) Диагнозы → события diagnosis (время: первая дата секции или admit_dt)
-    for e in ents:
-        if e["etype"] != "diagnosis":
-            continue
-        val = json.loads(e["value_json"]) if isinstance(e["value_json"], str) else e["value_json"]
-        sec_id = e["section_id"]
-        sec_time = section_dt_list.get(sec_id, [None])
-        ev_ts = sec_time[0][2] if (sec_time and sec_time[0]) else doc["admit_dt"]
-        events.append({
-            "kind": "diagnosis",
-            "when": ev_ts,
-            "section_id": sec_id,
-            "start": e["start"],
-            "end": e["end"],
-            "value": val
-        })
-
-    # Вспомогательная: ближайшее время в секции
-    def nearest_dt_iso(sec_id: Optional[str], pos: int) -> Optional[str]:
-        if not sec_id:
-            return None
-        cands = section_dt_list.get(sec_id) or []
-        if not cands:
-            return None
-        i = min(range(len(cands)), key=lambda k: abs(cands[k][0] - pos))
-        return cands[i][2]
-
-    # 3) Медикаменты → events.medication (время: ближайший datetime внутри секции, если есть)
-    for e in ents:
-        if e["etype"] != "medication":
-            continue
-        val = json.loads(e["value_json"]) if isinstance(e["value_json"], str) else e["value_json"]
-        ts = nearest_dt_iso(e["section_id"], e["start"])
-        events.append({
-            "kind": "medication",
-            "when": ts,
-            "section_id": e["section_id"],
-            "start": e["start"],
-            "end": e["end"],
-            "value": val
-        })
-
-    # 4) Витальные → events.vital (аналогично)
-    for e in ents:
-        if e["etype"] != "vital":
-            continue
-        val = json.loads(e["value_json"]) if isinstance(e["value_json"], str) else e["value_json"]
-        ts = nearest_dt_iso(e["section_id"], e["start"])
-        events.append({
-            "kind": "vital",
-            "when": ts,
-            "section_id": e["section_id"],
-            "start": e["start"],
-            "end": e["end"],
-            "value": val
-        })
-
-    # Сортировка и запись
-    def sort_key(ev: Dict[str, Any]):
-        return (ev.get("when") is None, ev.get("when") or "9999-12-31T00:00")
-
-    events.sort(key=sort_key)
-    db.replace_events(doc_id, events)
-
-    return {"doc_id": doc_id, "status": "timeline", "events": len(events)}
 
 def main():
-    ap = argparse.ArgumentParser(description="medqc-timeline — построение ленты событий")
+    ap = argparse.ArgumentParser()
     ap.add_argument("--doc-id", required=True)
     args = ap.parse_args()
+    print(json.dumps(build_timeline(args.doc_id), ensure_ascii=False))
 
-    res = build_timeline(args.doc_id)
-    print(json.dumps(res, ensure_ascii=False, indent=2))
 
 if __name__ == "__main__":
     main()
