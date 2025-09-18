@@ -6,7 +6,8 @@ import subprocess
 from fastapi import FastAPI, File, UploadFile, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, PlainTextResponse, HTMLResponse
-
+from typing import Optional
+import uuid, datetime as dt
 # ENV
 DEFAULT_RULES_PACKAGE = os.getenv("DEFAULT_RULES_PACKAGE", "kz-standards")
 DEFAULT_RULES_VERSION = os.getenv("DEFAULT_RULES_VERSION", "2025-09-17")
@@ -33,40 +34,52 @@ def healthz():
     return {"status": "ok"}
 
 # --- upload/ingest (если у тебя уже был — можешь оставить свой, этот примерный) ---
+
+def make_doc_id(prefix: str = "KZ") -> str:
+    # Пример: KZ-20250918-94A30A4B
+    ts = dt.datetime.utcnow().strftime("%Y%m%d")
+    suf = uuid.uuid4().hex[:8].upper()
+    return f"{prefix}-{ts}-{suf}"
+
 @app.post("/v1/ingest")
 async def ingest(
     file: UploadFile = File(...),
-    doc_id: str = Form(...),
+    # form (optional)
+    doc_id: Optional[str] = Form(None),
     facility: str = Form(""),
     dept: str = Form(""),
-    author: str = Form("")
+    author: str = Form(""),
+    # также позволим query-параметр
+    doc_id_q: Optional[str] = None,
 ):
-    # сохраняем временно на диск
+    # выберем doc_id: приоритет form > query > автогенерация
+    the_doc_id = (doc_id or doc_id_q or make_doc_id())
+
     os.makedirs(UPLOADS_DIR, exist_ok=True)
-    tmp_path = os.path.join(UPLOADS_DIR, f"{doc_id}__{file.filename}")
+    tmp_path = os.path.join(UPLOADS_DIR, f"{the_doc_id}__{file.filename}")
     with open(tmp_path, "wb") as f:
         f.write(await file.read())
 
-    # прогоняем наш CLI ingest, который перенесёт в /app/uploads/<doc_id>/<filename> и обновит docs.*
     code, out, err = run_cmd([
         "python", "medqc_ingest.py",
         "--file", tmp_path,
-        "--doc-id", doc_id,
+        "--doc-id", the_doc_id,
         "--facility", facility,
         "--dept", dept,
         "--author", author,
     ])
     if code != 0:
         return JSONResponse(status_code=500, content={
-            "doc_id": doc_id,
+            "doc_id": the_doc_id,
             "status": "INGEST_ERROR",
             "stderr_tail": "\n".join((err or "").splitlines()[-30:])
         })
     try:
-        return JSONResponse(status_code=200, content=eval(out) if out.startswith("{") else {"doc_id": doc_id, "status": "INGESTED"})
+        return JSONResponse(status_code=200, content=eval(out) if out.strip().startswith("{") else {
+            "doc_id": the_doc_id, "status": "INGESTED"
+        })
     except Exception:
-        return JSONResponse(status_code=200, content={"doc_id": doc_id, "status": "INGESTED"})
-
+        return JSONResponse(status_code=200, content={"doc_id": the_doc_id, "status": "INGESTED"})
 # --- полный пайплайн: extract -> section -> entities -> timeline -> rules ---
 @app.post("/v1/pipeline/{doc_id}")
 def run_pipeline(doc_id: str):
