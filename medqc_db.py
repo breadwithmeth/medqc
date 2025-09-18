@@ -411,3 +411,50 @@ def get_events(conn: sqlite3.Connection, doc_id: str) -> List[Dict[str, Any]]:
     order = f" ORDER BY {ts_col}" if ts_col else ""
     cur = conn.execute(f"SELECT * FROM events WHERE doc_id=?{order}", (doc_id,))
     return list(dicts(cur, cur.fetchall()))
+
+# --- violations schema + мягкая миграция ---
+def ensure_violations_schema(conn: sqlite3.Connection):
+    """
+    Унифицированная таблица нарушений.
+    Базовые поля совместимы со старой схемой, новые — добавляются мягко.
+    """
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS violations(
+            id           INTEGER PRIMARY KEY,
+            doc_id       TEXT NOT NULL,
+            rule_id      TEXT NOT NULL,
+            severity     TEXT NOT NULL,
+            message      TEXT NOT NULL,
+            evidence_json TEXT,
+            sources_json  TEXT,
+            created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+            profile       TEXT,
+            extra_json    TEXT
+        );
+    """)
+    # мягкие добавления на случай старых БД
+    _ensure_column_simple(conn, "violations", "profile",   "TEXT")
+    _ensure_column_simple(conn, "violations", "extra_json","TEXT")
+    cols = _table_columns(conn, "violations")
+    if "created_at" not in cols:
+        conn.execute("ALTER TABLE violations ADD COLUMN created_at TEXT")
+        conn.execute("UPDATE violations SET created_at = datetime('now') WHERE created_at IS NULL")
+    try:
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_violations_doc ON violations(doc_id)")
+    except Exception:
+        pass
+
+# --- универсальная инициализация схемы для CLI, которые её просят ---
+def init_schema():
+    """
+    Создаёт/мигрирует все необходимые таблицы. Безопасно вызывать много раз.
+    """
+    with get_conn() as conn:
+        # порядок важен только для удобочитаемости
+        ensure_docs_schema(conn)
+        ensure_extract_tables(conn)
+        _ensure_sections_schema(conn)
+        _ensure_entities_schema(conn)
+        init_events_schema(conn)
+        ensure_violations_schema(conn)
+        conn.commit()
