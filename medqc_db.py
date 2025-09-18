@@ -39,12 +39,13 @@ def replace_sections(doc_id: str, rows: Iterable[Mapping]):
                 _val(r, "end", default=None),
                 _val(r, "title", default=None),
                 _val(r, "name", default=None),
-                _val(r, "text", "content", default="")
+                _val(r, "text", "content", default=""),
+                _val(r, "kind", default=None)
             ))
         if payload:
             conn.executemany("""
-                INSERT INTO sections(doc_id, idx, start, "end", title, name, text, created_at)
-                VALUES(?,?,?,?,?,?,?, datetime('now'))
+                INSERT INTO sections(doc_id, idx, start, "end", title, name, text, kind, created_at)
+                VALUES(?,?,?,?,?,?,?,?, datetime('now'))
             """, payload)
         conn.commit()
 
@@ -275,6 +276,7 @@ def _ensure_sections_schema(conn: sqlite3.Connection):
             title      TEXT,
             name       TEXT,
             text       TEXT,
+            kind       TEXT, 
             created_at TEXT
         );
     """)
@@ -285,6 +287,7 @@ def _ensure_sections_schema(conn: sqlite3.Connection):
     _ensure_column_simple(conn, "sections", "title","TEXT")
     _ensure_column_simple(conn, "sections", "name", "TEXT")
     _ensure_column_simple(conn, "sections", "text", "TEXT")
+    _ensure_column_simple(conn, "sections", "kind", "TEXT")
     if "created_at" not in _table_columns(conn, "sections"):
         conn.execute("ALTER TABLE sections ADD COLUMN created_at TEXT")
         conn.execute("UPDATE sections SET created_at = datetime('now') WHERE created_at IS NULL")
