@@ -352,19 +352,28 @@ def replace_entities(doc_id: str, rows: Iterable[Mapping]):
         conn.commit()
 
 
-def get_sections(doc_id: str) -> list[dict]:
+def get_sections(doc_id: str) -> List[Dict[str, Any]]:
     """
-    Возвращает список секций документа.
-    Каждая секция: dict с ключами id, doc_id, idx, start, end, title, name, text, created_at.
+    Возвращает секции документа c едиными ключами.
+    Гарантирует наличие алиаса section_id (равен id), а также ключей idx/start/end/title/name/text.
     """
     with get_conn() as conn:
-        try:
-            cur = conn.execute(
-                "SELECT id, doc_id, idx, start, \"end\", title, name, text, created_at "
-                "FROM sections WHERE doc_id=? ORDER BY idx",
-                (doc_id,)
-            )
-            cols = [d[0] for d in cur.description]
-            return [dict(zip(cols, row)) for row in cur.fetchall()]
-        except Exception:
-            return []
+        # Пытаемся упорядочить по idx, если его нет — по start, иначе по id
+        order_by = "idx"
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(sections)").fetchall()]
+        if "idx" not in cols:
+            order_by = "start" if "start" in cols else "id"
+
+        cur = conn.execute(f"SELECT * FROM sections WHERE doc_id=? ORDER BY {order_by}", (doc_id,))
+        rows = []
+        if cur.description:
+            colnames = [c[0] for c in cur.description]
+            for rec in cur.fetchall():
+                row = dict(zip(colnames, rec))
+                # алиас для совместимости с кодом, ожидающим 'section_id'
+                row.setdefault("section_id", row.get("id"))
+                # гарантируем наличие полей
+                for k in ("idx", "start", "end", "title", "name", "text"):
+                    row.setdefault(k, None)
+                rows.append(row)
+        return rows
