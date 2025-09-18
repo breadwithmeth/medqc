@@ -1,24 +1,25 @@
 # medqc_api.py
-# Минимальные правки: перед применением правил превращаем sqlite3.Row → dict,
-# чтобы .get(...) в правилах был безопасен.
+# Стартап: ensure_schema(); /v1/admin/migrate вызывает реальный импорт правил
 
 from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel
 from typing import Any, Dict, Optional
+import os
 
 import medqc_db as db
 import medqc_rules as rules
-
-import os
+import medqc_norms_admin as norms_admin
 
 APP_DB_PATH = os.environ.get("MEDQC_DB", "/app/medqc.db")
+RULES_JSON_PATH = os.environ.get("MEDQC_RULES_JSON", "/app/rules.json")
 
 app = FastAPI(title="medqc API")
 
-# Инициализация коннекта (упрощённо, без пулов)
+# Инициализация коннекта и схемы
 CONN = db.connect(APP_DB_PATH)
+db.ensure_schema(CONN)
 
-# ---------- Модели (по минимуму для примеров) ----------
+# ---------- Модели (минимум) ----------
 
 class IngestPayload(BaseModel):
     doc_id: str
@@ -59,7 +60,6 @@ def get_doc_stats(doc_id: str):
 
 @app.post("/v1/ingest")
 def ingest(payload: IngestPayload):
-    # Сюда обычно входит парсинг, нормализация и upsert документа
     doc = {
         "doc_id": payload.doc_id,
         "profile": payload.profile,
@@ -74,38 +74,20 @@ def ingest(payload: IngestPayload):
 
 @app.get("/v1/debug/rules")
 def debug_rules(doc_id: str = Query(..., description="Document ID")):
-    """
-    Диагностика применимости правил: извлекаем doc/entities/events из БД,
-    гарантируем dict, и передаём в движок правил.
-    """
     doc = db.get_doc(CONN, doc_id)
     if not doc:
         raise HTTPException(status_code=404, detail="doc not found")
 
-    # ВАЖНО: doc уже dict (вариант А). Если по каким-то причинам upstream вернул row,
-    # можно продублировать защиту:
-    if not isinstance(doc, dict):
-        try:
-            doc = dict(doc)  # fallback, если кто-то вернул sqlite3.Row
-        except Exception:
-            pass
-
-    ents = db.get_doc_entities(CONN, doc_id)  # уже list[dict]
-    evs = db.get_doc_events(CONN, doc_id)     # уже list[dict]
+    ents = db.get_doc_entities(CONN, doc_id)
+    evs  = db.get_doc_events(CONN, doc_id)
 
     try:
-        prof = rules.infer_profiles(doc, ents, evs)  # внутри можно использовать .get
+        prof = rules.infer_profiles(doc, ents, evs)
         result = rules.debug_apply_rules(CONN, doc, ents, evs, prof)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"rules debug failed: {e}")
 
-    return {
-        "doc_id": doc_id,
-        "profile_inferred": prof,
-        "debug": result,
-    }
-
-# ---------- Выполнение правил и отчёты (заглушки под интерфейс) ----------
+    return {"doc_id": doc_id, "profile_inferred": prof, "debug": result}
 
 @app.post("/v1/run-rules")
 def run_rules(body: Dict[str, Any]):
@@ -118,7 +100,7 @@ def run_rules(body: Dict[str, Any]):
         raise HTTPException(status_code=404, detail="doc not found")
 
     ents = db.get_doc_entities(CONN, doc_id)
-    evs = db.get_doc_events(CONN, doc_id)
+    evs  = db.get_doc_events(CONN, doc_id)
 
     prof = rules.infer_profiles(doc, ents, evs)
     summary = rules.apply_rules_and_store(CONN, doc, ents, evs, prof)
@@ -126,8 +108,6 @@ def run_rules(body: Dict[str, Any]):
 
 @app.get("/v1/rules/{doc_id}")
 def list_rules_for_doc(doc_id: str):
-    # возвращает статусы правил по документу (как вы реализовали)
-    # здесь условно:
     apps = db.list_rule_applications(CONN, doc_id)
     return {"doc_id": doc_id, "rule_applications": apps}
 
@@ -138,22 +118,19 @@ def list_violations(doc_id: str):
 
 @app.get("/v1/report/{doc_id}")
 def get_report(doc_id: str):
-    # сгенерированный отчёт (если есть отдельная таблица/хранилище)
-    # можно вернуть шаблон, ниже просто заглушка
     vio = db.list_violations(CONN, doc_id)
-    return {
-        "doc_id": doc_id,
-        "violations": vio,
-        "note": "Здесь может быть HTML/PDF отчёт, если реализовано."
-    }
+    return {"doc_id": doc_id, "violations": vio, "note": "Render your HTML/PDF here."}
 
 # ---------- Admin ----------
 
 @app.post("/v1/admin/migrate")
 def migrate():
     """
-    Миграция/импорт правил из rules.json (если у вас реализован в другом модуле — вызовите его здесь).
-    Здесь просто заглушка.
+    Создаёт схему (идемпотентно) и импортирует / активирует rules.json.
     """
-    # например: medqc_norms_admin.migrate(CONN, "/app/rules.json")
-    return {"status": "migrated"}
+    try:
+        db.ensure_schema(CONN)
+        result = norms_admin.migrate(CONN, RULES_JSON_PATH)
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
