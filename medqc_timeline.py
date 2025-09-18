@@ -1,109 +1,80 @@
-#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-
+import os
 import json
-import argparse
 import sqlite3
-import re
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Dict
 
-from medqc_db import (
-    get_conn,
-    get_sections,
-    get_entities,
-    init_events_schema,
-    clear_events,
-    add_event,
-)
+DB_PATH = os.getenv("MEDQC_DB", "/app/medqc.db")
 
-# Нормализация дат/времени
-def parse_iso_any(s: Optional[str]) -> Optional[datetime]:
-    if not s:
-        return None
-    s = str(s).strip()
-    for fmt in ("%Y-%m-%dT%H:%M:%S",
-                "%Y-%m-%dT%H:%M",
-                "%Y-%m-%d %H:%M:%S",
-                "%Y-%m-%d %H:%M",
-                "%Y-%m-%d"):
-        try:
-            return datetime.strptime(s, fmt)
-        except Exception:
-            pass
-    try:
-        t = s.replace("Z", "")
-        if "+" in t:
-            t = t.split("+", 1)[0]
-        return datetime.fromisoformat(t)
-    except Exception:
-        return None
+def get_conn():
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    return conn
 
-DATE_RE = re.compile(r"(?:(?:20|19)\d{2})[-./](?:0?[1-9]|1[0-2])[-./](?:0?[1-9]|[12]\d|3[01])(?:[ T](?:[01]?\d|2[0-3]):[0-5]\d(?::[0-5]\d)?)?")
+def ensure_schema(conn: sqlite3.Connection):
+    conn.executescript("""
+    CREATE TABLE IF NOT EXISTS events(
+      id         INTEGER PRIMARY KEY AUTOINCREMENT,
+      doc_id     TEXT NOT NULL,
+      kind       TEXT,
+      ts         TEXT,
+      payload    TEXT,
+      created_at TEXT NOT NULL
+    );
+    """)
+    conn.commit()
 
-def guess_admit_discharge_from_sections(sections: List[Dict[str, Any]]) -> Dict[str, Optional[datetime]]:
-    admit = None
-    discharge = None
-    for s in sections:
-        title = (s.get("title") or s.get("name") or "").lower()
-        body = (s.get("text") or s.get("content") or "")
-        if any(w in title for w in ("поступлен", "госпитал")):
-            m = DATE_RE.search(body)
-            if m:
-                admit = parse_iso_any(m.group(0))
-        if any(w in title for w in ("выпис", "заключ", "эпикриз")):
-            m = DATE_RE.search(body)
-            if m:
-                discharge = parse_iso_any(m.group(0))
-    return {"admit": admit, "discharge": discharge}
+# простая нормализация kind (на случай старых пайпов)
+def normalize_kind(k: str) -> str:
+    t = (k or "").lower()
+    syn = {
+        "admit": ["admit","поступ","госпитал"],
+        "discharge": ["discharge","выписк","выбыт"],
+        "daily_note": ["daily_note","ежеднев","осмотр","жалоб","состояни"],
+        "triage": ["triage","триаж","сортиров","ПДО","приёмн","приемн"],
+        "ecg": ["ecg","экг"],
+        "lab": ["lab","анализ","лаборат","оак","общий анализ крови","биохим","crp","срб"],
+        "initial_exam": ["initial_exam","первичн","осмотр при поступ"]
+    }
+    for canon, keys in syn.items():
+        if any(x.lower() in t for x in keys):
+            return canon
+    return t
 
-def build_timeline(doc_id: str) -> Dict[str, Any]:
-    with get_conn() as conn:
-        init_events_schema(conn)
-        clear_events(conn, doc_id)
+def run_timeline(doc_id: str) -> Dict[str,int]:
+    conn = get_conn()
+    ensure_schema(conn)
 
-        sections = get_sections(conn, doc_id)  # универсальная сигнатура
-        entities = get_entities(conn, doc_id)
+    rows = conn.execute("SELECT id, kind, ts, payload FROM events WHERE doc_id=?", (doc_id,)).fetchall()
+    if not rows:
+        conn.close()
+        return {"doc_id": doc_id, "normalized": 0}
 
-        # 1) события из сущностей (если уже размечены)
-        for e in entities:
-            et = (e.get("etype") or "").lower()
-            try:
-                data = json.loads(e.get("value_json") or "{}")
-            except Exception:
-                data = {}
-            tsv = data.get("ts") or data.get("when")
-            ts = parse_iso_any(tsv) if isinstance(tsv, str) else None
-            ts_str = ts.strftime("%Y-%m-%dT%H:%M:%S") if ts else None
+    changed = 0
+    for r in rows:
+        kid = r["id"]
+        k = normalize_kind(r["kind"])
+        ts = r["ts"]
+        # если ts пусто и в payload есть подсказки — можно добавить, но оставим консервативно
+        if k != r["kind"]:
+            conn.execute("UPDATE events SET kind=? WHERE id=?", (k, kid))
+            changed += 1
+        # очистим payload от мусора типа слишком длинного контекста (необязательно)
+        # p = json.loads(r["payload"] or "{}")
+        # if "context" in p and len(p["context"]) > 1000: p["context"] = p["context"][:1000]
+        # conn.execute("UPDATE events SET payload=? WHERE id=?", (json.dumps(p, ensure_ascii=False), kid))
 
-            if et in ("exam_initial", "первичный осмотр"):
-                add_event(conn, doc_id, "initial_exam", ts_str, data)
-            elif et in ("discharge_summary", "эпикриз"):
-                add_event(conn, doc_id, "epicrisis", ts_str, data)
-            elif et in ("med_order", "назначен", "лист назначений"):
-                add_event(conn, doc_id, "med_order", ts_str, data)
-            elif et in ("complaint", "symptom", "жалоб", "симптом"):
-                add_event(conn, doc_id, "complaint", ts_str, data)
-            elif et in ("isolation", "infection_control", "изоляция"):
-                add_event(conn, doc_id, "infection_control", ts_str, data)
-
-        # 2) эвристика по секциям
-        ad = guess_admit_discharge_from_sections(sections)
-        if ad.get("admit"):
-            add_event(conn, doc_id, "admit", ad["admit"].strftime("%Y-%m-%dT%H:%M:%S"), {})
-        if ad.get("discharge"):
-            add_event(conn, doc_id, "discharge", ad["discharge"].strftime("%Y-%m-%dT%H:%M:%S"), {})
-
-        conn.commit()
-        cur = conn.execute("SELECT kind, ts FROM events WHERE doc_id=? ORDER BY ts", (doc_id,))
-        events = [{"kind": k, "ts": t} for (k, t) in cur.fetchall()]
-        return {"doc_id": doc_id, "events": events, "status": "timeline_built"}
+    conn.commit()
+    conn.close()
+    return {"doc_id": doc_id, "normalized": changed}
 
 def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--doc-id", required=True)
-    args = ap.parse_args()
-    print(json.dumps(build_timeline(args.doc_id), ensure_ascii=False))
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--doc-id", required=True)
+    args = parser.parse_args()
+    print(json.dumps(run_timeline(args.doc_id), ensure_ascii=False))
 
 if __name__ == "__main__":
     main()
