@@ -6,6 +6,7 @@ import glob
 import json
 import sqlite3
 from typing import Any, Dict, List, Optional, Tuple
+import glob
 
 DB_PATH = os.getenv("MEDQC_DB", "./medqc.db")
 UPLOADS_DIR = os.getenv("MEDQC_UPLOADS", "/app/uploads")
@@ -33,7 +34,6 @@ def get_doc(conn: sqlite3.Connection, doc_id: str) -> Dict[str, Any]:
     cols = [d[0] for d in cur.description]
     return dict(zip(cols, row))
 
-
 def get_doc_file_path(conn: sqlite3.Connection, doc_id: str) -> Optional[str]:
     """
     Возвращает абсолютный путь к исходному файлу документа.
@@ -42,16 +42,15 @@ def get_doc_file_path(conn: sqlite3.Connection, doc_id: str) -> Optional[str]:
       2) docs.path
       3) /app/uploads/<doc_id>/<filename>
       4) любой файл в /app/uploads/<doc_id>/*
+      5) ЛЕГАСИ: /app/uploads/<doc_id>__*.*
+      6) ЛЕГАСИ: /app/uploads/<doc_id>*.*
     """
     cur = conn.execute("SELECT * FROM docs WHERE doc_id=?", (doc_id,))
     row = cur.fetchone()
-    if not row:
-        return None
+    cols = [d[0] for d in cur.description] if cur.description else []
+    data = dict(zip(cols, row)) if row else {}
 
-    cols = [d[0] for d in cur.description]
-    data = dict(zip(cols, row))
-
-    # 1) src_path — главный
+    # 1) src_path
     p = (data.get("src_path") or "").strip()
     if p:
         if os.path.isabs(p) and os.path.exists(p):
@@ -60,7 +59,7 @@ def get_doc_file_path(conn: sqlite3.Connection, doc_id: str) -> Optional[str]:
         if os.path.exists(cand):
             return cand
 
-    # 2) path (если задан)
+    # 2) path
     p = (data.get("path") or "").strip()
     if p:
         if os.path.isabs(p) and os.path.exists(p):
@@ -76,12 +75,22 @@ def get_doc_file_path(conn: sqlite3.Connection, doc_id: str) -> Optional[str]:
         if os.path.exists(cand):
             return cand
 
-    # 4) любой файл внутри uploads/<doc_id>
+    # 4) любой файл в uploads/<doc_id>/*
     folder = os.path.join(UPLOADS_DIR, doc_id)
     if os.path.isdir(folder):
         files = sorted(glob.glob(os.path.join(folder, "*")))
         if files:
             return files[0]
+
+    # 5) ЛЕГАСИ: /app/uploads/<doc_id>__*.*
+    legacy = sorted(glob.glob(os.path.join(UPLOADS_DIR, f"{doc_id}__*")))
+    if legacy:
+        return legacy[0]
+
+    # 6) ЛЕГАСИ: /app/uploads/<doc_id>*.*
+    legacy2 = sorted(glob.glob(os.path.join(UPLOADS_DIR, f"{doc_id}*")))
+    if legacy2:
+        return legacy2[0]
 
     return None
 
@@ -112,6 +121,32 @@ def get_events(conn: sqlite3.Connection, doc_id: str) -> List[Dict[str, Any]]:
     order = f" ORDER BY {ts_col}" if ts_col else ""
     cur = conn.execute(f"SELECT * FROM events WHERE doc_id=?{order}", (doc_id,))
     return list(dicts(cur, cur.fetchall()))
+
+
+
+def get_full_text(doc_id: str) -> str:
+    """
+    Возвращает полный текст документа:
+      1) из raw.content, если есть;
+      2) иначе склеивает pages.text по idx;
+      3) иначе пустая строка.
+    """
+    with get_conn() as conn:
+        # raw
+        cur = conn.execute("SELECT content FROM raw WHERE doc_id=?", (doc_id,))
+        row = cur.fetchone()
+        if row and row[0]:
+            return row[0]
+        # pages
+        try:
+            cur = conn.execute("SELECT text FROM pages WHERE doc_id=? ORDER BY idx", (doc_id,))
+            texts = [r[0] or "" for r in cur.fetchall()]
+            if texts:
+                return "\n\n".join(texts)
+        except Exception:
+            pass
+    return ""
+
 
 
 # ---------- simple init helpers (не агрессивно) ----------

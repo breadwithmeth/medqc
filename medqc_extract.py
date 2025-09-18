@@ -7,7 +7,9 @@ import argparse
 import sqlite3
 from typing import List
 
-from medqc_db import DB_PATH, ensure_extract_tables, get_conn, get_doc_file_path
+# вверху файла
+from medqc_db import get_conn, get_doc_file_path, ensure_extract_tables
+import glob, os
 
 # опциональные парсеры
 try:
@@ -60,8 +62,19 @@ def run_extract(doc_id: str) -> dict:
     with get_conn() as conn:
         src = get_doc_file_path(conn, doc_id)
         if not src or not os.path.exists(src):
-            raise RuntimeError(f"Source file not found for doc_id={doc_id}. Проверь docs.src_path/path/filename и /app/uploads/{doc_id}/")
-        # определим формат
+            # соберём кандидатов для диагностики
+            candidates = []
+            # legacy пути
+            candidates += glob.glob(os.path.join("/app/uploads", f"{doc_id}__*"))
+            candidates += glob.glob(os.path.join("/app/uploads", f"{doc_id}*"))
+            folder = os.path.join("/app/uploads", doc_id)
+            if os.path.isdir(folder):
+                candidates += glob.glob(os.path.join(folder, "*"))
+            raise RuntimeError(
+                "Source file not found for doc_id={}. "
+                "Checked docs.src_path/path/filename, /app/uploads/{}/ and legacy patterns. "
+                "Candidates seen: {}".format(doc_id, doc_id, candidates[:5])
+            )
         ext = os.path.splitext(src)[1].lower()
         if ext in (".pdf",):
             pages = extract_pdf_pages(src)
