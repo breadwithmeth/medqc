@@ -37,6 +37,62 @@ def dicts(cur, rows):
         yield dict(zip(cols, r))
 
 # ----------------------------------------------------------------------
+# docs: schema + helpers
+# ----------------------------------------------------------------------
+
+def ensure_docs_schema(conn: sqlite3.Connection):
+    """
+    Создаёт (если нет) таблицу docs и мягко добавляет недостающие столбцы.
+    Целевая схема:
+      doc_id TEXT PRIMARY KEY,
+      sha256 TEXT,
+      src_path TEXT,
+      mime TEXT,
+      size INTEGER,
+      facility TEXT,
+      dept TEXT,
+      author TEXT,
+      admit_dt TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      filename TEXT,
+      path TEXT,
+      department TEXT
+    """
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS docs(
+            doc_id     TEXT PRIMARY KEY,
+            sha256     TEXT,
+            src_path   TEXT,
+            mime       TEXT,
+            size       INTEGER,
+            facility   TEXT,
+            dept       TEXT,
+            author     TEXT,
+            admit_dt   TEXT,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            filename   TEXT,
+            path       TEXT,
+            department TEXT
+        );
+    """)
+    # мягкая миграция столбцов (если таблица существовала с иной схемой)
+    _ensure_column_simple(conn, "docs", "sha256",     "TEXT")
+    _ensure_column_simple(conn, "docs", "src_path",   "TEXT")
+    _ensure_column_simple(conn, "docs", "mime",       "TEXT")
+    _ensure_column_simple(conn, "docs", "size",       "INTEGER")
+    _ensure_column_simple(conn, "docs", "facility",   "TEXT")
+    _ensure_column_simple(conn, "docs", "dept",       "TEXT")
+    _ensure_column_simple(conn, "docs", "author",     "TEXT")
+    _ensure_column_simple(conn, "docs", "admit_dt",   "TEXT")
+    cols = _table_columns(conn, "docs")
+    if "created_at" not in cols:
+        conn.execute("ALTER TABLE docs ADD COLUMN created_at TEXT")
+        conn.execute("UPDATE docs SET created_at = datetime('now') WHERE created_at IS NULL")
+    _ensure_column_simple(conn, "docs", "filename",   "TEXT")
+    _ensure_column_simple(conn, "docs", "path",       "TEXT")
+    _ensure_column_simple(conn, "docs", "department", "TEXT")
+
+# ----------------------------------------------------------------------
 # Поиск исходного файла документа (docs.* + /app/uploads)
 # ----------------------------------------------------------------------
 
@@ -117,7 +173,7 @@ def ensure_extract_tables(conn: sqlite3.Connection):
     Создаём/мигрируем pages/raw. Для уже существующих таблиц мягко добавляем недостающие столбцы.
     Важно: при ALTER TABLE не используем неконстантные DEFAULT (sqlite не поддерживает).
     """
-    # pages: создать если нет
+    # pages
     conn.execute("""
         CREATE TABLE IF NOT EXISTS pages(
             id         INTEGER PRIMARY KEY,
@@ -127,22 +183,18 @@ def ensure_extract_tables(conn: sqlite3.Connection):
             created_at TEXT NOT NULL DEFAULT (datetime('now'))
         );
     """)
-    # мягкая миграция pages
     _ensure_column_simple(conn, "pages", "idx",  "INTEGER")
     _ensure_column_simple(conn, "pages", "text", "TEXT")
-    # created_at добавляем без DEFAULT, затем заполняем
     cols = _table_columns(conn, "pages")
     if "created_at" not in cols:
         conn.execute("ALTER TABLE pages ADD COLUMN created_at TEXT")
         conn.execute("UPDATE pages SET created_at = datetime('now') WHERE created_at IS NULL")
-
-    # индекс
     try:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_pages_doc ON pages(doc_id, idx)")
     except Exception:
         pass
 
-    # raw: создать если нет
+    # raw
     conn.execute("""
         CREATE TABLE IF NOT EXISTS raw(
             doc_id     TEXT PRIMARY KEY,
@@ -152,9 +204,6 @@ def ensure_extract_tables(conn: sqlite3.Connection):
     """)
 
 def get_full_text(doc_id: str) -> str:
-    """
-    Возвращает полный текст документа: raw.content или склейка pages.text.
-    """
     with get_conn() as conn:
         cur = conn.execute("SELECT content FROM raw WHERE doc_id=?", (doc_id,))
         row = cur.fetchone()
@@ -174,7 +223,6 @@ def get_full_text(doc_id: str) -> str:
 # ----------------------------------------------------------------------
 
 def _ensure_sections_schema(conn: sqlite3.Connection):
-    # создать если нет
     conn.execute("""
         CREATE TABLE IF NOT EXISTS sections(
             id         INTEGER PRIMARY KEY,
@@ -189,7 +237,6 @@ def _ensure_sections_schema(conn: sqlite3.Connection):
             created_at TEXT
         );
     """)
-    # мягкая миграция
     _ensure_column_simple(conn, "sections", "idx",   "INTEGER")
     _ensure_column_simple(conn, "sections", "start", "INTEGER")
     _ensure_column_simple(conn, "sections", "end",   "INTEGER")
@@ -212,10 +259,6 @@ def _val(d: Mapping, *keys, default=None):
     return default
 
 def replace_sections(doc_id: str, rows: Iterable[Mapping]):
-    """
-    Полностью заменяет секции документа.
-    rows: dict-подобные объекты с ключами idx/start/end/title/name/text/kind (избыточные — игнорируются).
-    """
     with get_conn() as conn:
         _ensure_sections_schema(conn)
         conn.execute("DELETE FROM sections WHERE doc_id=?", (doc_id,))
@@ -239,13 +282,6 @@ def replace_sections(doc_id: str, rows: Iterable[Mapping]):
         conn.commit()
 
 def get_sections(*args, **kwargs) -> List[Dict[str, Any]]:
-    """
-    Универсальный доступ к секциям документа.
-    Поддерживает вызовы:
-      get_sections(doc_id)
-      get_sections(conn, doc_id)
-    Гарантирует алиас 'section_id' и наличие ключей.
-    """
     if len(args) == 1:
         conn = get_conn()
         doc_id = args[0]
@@ -312,10 +348,6 @@ def _ensure_entities_schema(conn: sqlite3.Connection):
         pass
 
 def replace_entities(doc_id: str, rows: Iterable[Mapping]):
-    """
-    Полностью заменяет сущности документа.
-    rows: dict-подобные объекты с ключами: etype, value_json|value, span_start|start, span_end|end, section_id.
-    """
     with get_conn() as conn:
         _ensure_entities_schema(conn)
         conn.execute("DELETE FROM entities WHERE doc_id=?", (doc_id,))
@@ -348,7 +380,7 @@ def get_entities(conn: sqlite3.Connection, doc_id: str) -> List[Dict[str, Any]]:
     return list(dicts(cur, cur.fetchall()))
 
 # ----------------------------------------------------------------------
-# events: (используется timeline/rules)
+# events (для timeline/rules)
 # ----------------------------------------------------------------------
 
 def init_events_schema(conn: sqlite3.Connection):
