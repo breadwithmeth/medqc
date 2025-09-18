@@ -1,39 +1,36 @@
 FROM python:3.11-slim
 
 ENV PYTHONUNBUFFERED=1 \
-    PYTHONDONTWRITEBYTECODE=1 \
-    PIP_NO_CACHE_DIR=1
+    PIP_NO_CACHE_DIR=1 \
+    PYTHONDONTWRITEBYTECODE=1
 
-# Системные пакеты — добавь/убери при необходимости (psycopg2, Pillow, lxml и т.п.)
+# Базовые системные пакеты. Для PyMuPDF обычно хватает колёс,
+# но на slim добавим минимумы — пригодится для многих зависимостей.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential curl ca-certificates \
+    ca-certificates curl build-essential pkg-config \
  && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-# Сначала зависимости — для кэша
-COPY requirements.txt .
+# Зависимости — до кода (кэш сборки)
+COPY requirements.txt ./
 RUN pip install -r requirements.txt
 
-# Затем код
+# Код
 COPY . .
 
-# Если rules.json в репо — этой строки НЕ нужно:
-# COPY rules.json /app/rules.json
-
-# Переменные окружения (можно переопределить в Coolify)
-ENV MEDQC_DB=/app/medqc.db \
+# Переменные по умолчанию (их можно переопределять в Coolify)
+ENV PYTHONPATH=/app \
+    PORT=8000 \
+    MEDQC_DB=/data/medqc.db \
     DEFAULT_RULES_PACKAGE=kz-standards \
     DEFAULT_RULES_VERSION=2025-09-17 \
     RULES_IMPORT_ON_START=0 \
     RULES_FILE=/app/rules.json
 
-# Entrypoint + CMD
+# Entrypoint
 COPY docker/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
 EXPOSE 8000
 ENTRYPOINT ["/entrypoint.sh"]
-# ВАЖНО: Пусть CMD задаёт команду запуска веб-сервера.
-# Для FastAPI/Starlette:
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "${PORT:-8000}"]
