@@ -46,16 +46,18 @@ def extract_docx_paragraphs(path: str) -> List[str]:
     # разбивать по страницам DOCX сложно; положим всю «страницу» как idx=0
     return [content] if content else []
 
-
 def save_pages(conn: sqlite3.Connection, doc_id: str, pages: List[str]):
     ensure_extract_tables(conn)
-    # очищаем прежние
+    # очищаем прежние страницы документа
     conn.execute("DELETE FROM pages WHERE doc_id=?", (doc_id,))
-    # вставляем
-    for idx, txt in enumerate(pages):
-        conn.execute("INSERT INTO pages(doc_id, idx, text) VALUES(?,?,?)", (doc_id, idx, txt))
-    # также кладём «сырой» конкатенированный текст
-    conn.execute("INSERT OR REPLACE INTO raw(doc_id, content) VALUES(?,?)", (doc_id, "\n\n".join(pages)))
+    # массовая вставка в транзакции
+    conn.executemany(
+        "INSERT INTO pages(doc_id, idx, text) VALUES(?,?,?)",
+        [(doc_id, i, (txt or "")) for i, txt in enumerate(pages)]
+    )
+    # сырой склеенный текст
+    full = "\n\n".join(pages)
+    conn.execute("INSERT OR REPLACE INTO raw(doc_id, content) VALUES(?,?)", (doc_id, full))
 
 
 def run_extract(doc_id: str) -> dict:

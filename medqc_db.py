@@ -170,6 +170,49 @@ CREATE TABLE IF NOT EXISTS raw(
 );
 """
 
+def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
+    try:
+        rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+        return {r[1] for r in rows}
+    except Exception:
+        return set()
+
+def _ensure_column(conn: sqlite3.Connection, table: str, col: str, decl: str):
+    cols = _table_columns(conn, table)
+    if col not in cols:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
+
 def ensure_extract_tables(conn: sqlite3.Connection):
-    conn.executescript(SCHEMA_PAGES)
-    conn.executescript(SCHEMA_RAW)
+    """
+    Гарантируем, что есть таблицы pages/raw с нужными колонками.
+    Если pages уже существовала по старой схеме, мягко добавим недостающие столбцы.
+    """
+    # 1) создать, если вообще нет
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS pages(
+            id         INTEGER PRIMARY KEY,
+            doc_id     TEXT NOT NULL,
+            idx        INTEGER,
+            text       TEXT,
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+    """)
+    # 2) мягкая миграция существующей схемы
+    _ensure_column(conn, "pages", "idx",  "INTEGER")
+    _ensure_column(conn, "pages", "text", "TEXT")
+    _ensure_column(conn, "pages", "created_at", "TEXT NOT NULL DEFAULT (datetime('now'))")
+
+    # индексы (игнорируем ошибку, если уже созданы)
+    try:
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_pages_doc ON pages(doc_id, idx)")
+    except Exception:
+        pass
+
+    # raw
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS raw(
+            doc_id     TEXT PRIMARY KEY,
+            content    TEXT,
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+    """)
